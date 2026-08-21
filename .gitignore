@@ -1,0 +1,116 @@
+# OSX
+#
+.DS_Store
+
+# Xcode
+#
+build/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata
+*.xccheckout
+*.moved-aside
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+**/.xcode.env.local
+
+# Android/IntelliJ
+#
+build/
+.idea
+.gradle
+local.properties
+*.iml
+*.hprof
+.cxx/
+*.keystore
+!debug.keystore
+.kotlin/
+
+# node.js
+#
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# fastlane
+#
+# It is recommended to not store the screenshots in the git repo. Instead, use fastlane to re-generate the
+# screenshots whenever they are needed.
+# For more information about the recommended setup visit:
+# https://docs.fastlane.tools/best-practices/source-control/
+
+**/fastlane/report.xml
+**/fastlane/Preview.html
+**/fastlane/screenshots
+**/fastlane/test_output
+
+# Bundle artifact
+*.jsbundle
+
+# Ruby / CocoaPods
+**/Pods/
+/vendor/bundle/
+
+# Temporary files created by Metro to check the health of the file watcher
+.metro-health-check*
+
+# testing
+/coverage
+
+# Yarn
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# =====================================================================
+# DeepSeek Harness Mobile 专用
+# =====================================================================
+
+# ---- 运行时资产（由 scripts/ 生成或在构建期下载，不入库） ----
+/bundle-staging/
+android/app/src/main/assets/dsh/*.dat
+android/app/src/main/assets/dsh/*.tar.gz
+android/app/src/main/assets/dsh/debs/
+android/app/src/main/assets/termux/bootstrap-aarch64.zip
+android/app/src/main/assets/termux/libdsh-pathremap.so
+
+# ---- 第三方预编译二进制（构建前需自行下载放置） ----
+mmmbuto-node-pty-android-arm64-1.1.2.tgz
+
+# ---- proot-distro 打包中间产物 / 下载的 deb ----
+/proot-distro/debs/
+/proot-distro/ex[0-9]/
+/proot-distro/merged/
+/proot-distro/p[0-9]/
+/proot-distro/stage-usr/
+/proot-distro/t_*/
+/proot-distro/*.deb
+/proot-distro/*.tar.gz
+/proot-distro/Packages
+/proot-distro/Packages.gz
+
+# ---- 开发调试残留 ----
+/.elf-check/
+/test-*.sh
+/install-debian.sh
+/cdp-probe.cjs
+/ui-check.png
+/ui-dump*.xml
+
+# ---- iOS 暂不支持 ----
+/ios/
+/.bundle/
+/Gemfile
+/Gemfile.lock

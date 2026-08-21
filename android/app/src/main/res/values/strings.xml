@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">DeepSeek Harness</string>
+    <string name="accessibility_service_description">授权后 AI 可读取当前屏幕界面元素并执行点击、滑动、输入等操作来控制手机（例如打开应用、填写表单、浏览页面）。请仅在信任 AI 时开启。</string>
+</resources>
