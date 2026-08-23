@@ -217,7 +217,8 @@ function Step-Github {
         if ($LASTEXITCODE -ne 0) { throw "提交本地改动失败" }
         Write-Host "   已提交本地改动（release $Tag）" -ForegroundColor Green
     }
-    # 同步远端：本地落后（non-fast-forward）时先 rebase 合并远端提交，再推送
+    # 同步远端：本地落后（non-fast-forward）时先 rebase 合并远端提交，再推送。
+    # rebase 冲突时自动采用「本地版本」（发布语义 = 把本地当前代码推上去）。
     git -C $RepoRoot fetch $GhRemote 2>$null
     $counts = (git -C $RepoRoot rev-list --left-right --count "HEAD...$GhRemote/$GhBranch" 2>$null).Trim()
     if ($counts) {
@@ -225,8 +226,17 @@ function Step-Github {
         $behind = [int]$parts[1]
         if ($behind -gt 0) {
             Write-Host "   远端领先 $behind 个提交，rebase 合并..." -ForegroundColor Yellow
-            git -C $RepoRoot pull --rebase $GhRemote $GhBranch | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "git rebase 失败，请手动解决冲突后重试" }
+            git -C $RepoRoot rebase $GhRemote/$GhBranch | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "   rebase 冲突，自动采用本地版本解决..." -ForegroundColor Yellow
+                $conflicts = (git -C $RepoRoot diff --name-only --diff-filter=U 2>$null)
+                if ($conflicts) {
+                    $conflicts | ForEach-Object { git -C $RepoRoot checkout --theirs -- $_ 2>$null; git -C $RepoRoot add -- $_ 2>$null }
+                }
+                $env:GIT_EDITOR = "true"
+                git -C $RepoRoot rebase --continue | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "git rebase 冲突自动解决失败，请手动处理" }
+            }
         }
     }
     git -C $RepoRoot push $GhRemote "$GhBranch" | Out-Null
