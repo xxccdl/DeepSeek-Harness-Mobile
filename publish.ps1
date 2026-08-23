@@ -117,10 +117,12 @@ $ApkName= "app-release.apk"
 function Resolve-Curl {
     $c = Get-Command curl.exe -ErrorAction SilentlyContinue
     if (-not $c) { throw "未找到 curl.exe" }
-    # Windows 自带的 curl 走 schannel，国内网络访问 GitHub/Gitee 时证书吊销检查
-    # （CRYPT_E_NO_REVOCATION_CHECK）会失败；用 --ssl-no-revoke 跳过吊销列表检查。
-    return @($c.Source, "--ssl-no-revoke")
+    return $c.Source
 }
+# Windows 自带 curl 走 schannel，国内网络访问 GitHub/Gitee 时证书吊销检查
+# （CRYPT_E_NO_REVOCATION_CHECK）会失败；统一附带 --ssl-no-revoke 跳过吊销列表检查。
+# 注意：不能放进数组再 `& $array`（PS5.1 会把数组整体当命令名），必须以参数数组展开。
+$curlArgs = @("--ssl-no-revoke")
 
 function Resolve-7z {
     $candidates = @(
@@ -247,7 +249,7 @@ function Step-Github {
     git -C $RepoRoot push -f $GhRemote $Tag | Out-Null
 
     # 查找/创建 release
-    $existing = Invoke-Json { & $curl -sS "$GhApi/releases/tags/$Tag" @authHeaders }
+    $existing = Invoke-Json { & $curl $curlArgs -sS "$GhApi/releases/tags/$Tag" @authHeaders }
     $releaseId = $null
     if ($existing -and $existing.id) {
         $releaseId = $existing.id
@@ -259,26 +261,26 @@ function Step-Github {
         } | ConvertTo-Json
         $bodyFile = Join-Path $env:TEMP "gh-release-$Tag.json"
         Write-Utf8File $bodyFile $bodyJson
-        $created = Invoke-Json { & $curl -sS -X POST "$GhApi/releases" @authHeaders -H "Content-Type: application/json" --data-binary "@$bodyFile" }
+        $created = Invoke-Json { & $curl $curlArgs -sS -X POST "$GhApi/releases" @authHeaders -H "Content-Type: application/json" --data-binary "@$bodyFile" }
         if (-not ($created -and $created.id)) { throw "创建 GitHub release 失败" }
         $releaseId = $created.id
         Write-Host "   创建 GitHub release id=$releaseId" -ForegroundColor Green
     }
 
     # 删除同名旧资产（避免重复）
-    $assets = Invoke-Json { & $curl -sS "$GhApi/releases/$releaseId/assets" @authHeaders }
+    $assets = Invoke-Json { & $curl $curlArgs -sS "$GhApi/releases/$releaseId/assets" @authHeaders }
     if ($assets) {
         foreach ($a in @($assets)) {
             if ($a.name -eq $ApkName) {
                 Write-Host "   删除旧资产 $($a.name) (id=$($a.id))" -ForegroundColor Yellow
-                & $curl -sS -X DELETE "$GhApi/releases/assets/$($a.id)" @authHeaders | Out-Null
+                & $curl $curlArgs -sS -X DELETE "$GhApi/releases/assets/$($a.id)" @authHeaders | Out-Null
             }
         }
     }
 
     # 上传 APK
     Write-Host "   上传 APK 到 GitHub release ..."
-    $up = Invoke-Json { & $curl -sS -X POST "https://uploads.github.com/repos/$GhOwner/$GhRepo/releases/$releaseId/assets?name=$ApkName" @authHeaders -H "Content-Type: application/vnd.android.package-archive" --data-binary "@$ApkPath" }
+    $up = Invoke-Json { & $curl $curlArgs -sS -X POST "https://uploads.github.com/repos/$GhOwner/$GhRepo/releases/$releaseId/assets?name=$ApkName" @authHeaders -H "Content-Type: application/vnd.android.package-archive" --data-binary "@$ApkPath" }
     if ($up -and $up.browser_download_url) { Write-Host "   GitHub 资产上传成功" -ForegroundColor Green }
     else { Write-Warning "GitHub 资产上传可能失败" }
 }
@@ -298,7 +300,7 @@ function Step-Gitee {
     }
 
     # 查找/创建 release
-    $existing = Invoke-Json { & $curl -sS "$GtApi/releases/tags/$Tag`?access_token=$token" }
+    $existing = Invoke-Json { & $curl $curlArgs -sS "$GtApi/releases/tags/$Tag`?access_token=$token" }
     $releaseId = $null
     if ($existing -and $existing.id) {
         $releaseId = $existing.id
@@ -306,7 +308,7 @@ function Step-Gitee {
     } else {
         $bodyFile = Join-Path $env:TEMP "gt-release-$Tag.md"
         Write-Utf8File $bodyFile (Get-ReleaseBody)
-        $created = Invoke-Json { & $curl -sS -X POST "$GtApi/releases" --data-urlencode "access_token=$token" --data-urlencode "tag_name=$Tag" --data-urlencode "name=$Tag" --data-urlencode "body@$bodyFile" }
+        $created = Invoke-Json { & $curl $curlArgs -sS -X POST "$GtApi/releases" --data-urlencode "access_token=$token" --data-urlencode "tag_name=$Tag" --data-urlencode "name=$Tag" --data-urlencode "body@$bodyFile" }
         if (-not ($created -and $created.id)) { throw "创建 Gitee release 失败" }
         $releaseId = $created.id
         Write-Host "   创建 Gitee release id=$releaseId" -ForegroundColor Green
@@ -314,12 +316,12 @@ function Step-Gitee {
 
     # 释放仓库配额：删除旧 .apk / .zip.00* 附件
     Write-Line "==> [6/7] 清理 Gitee 旧 APK 附件（释放配额）"
-    $attach = Invoke-Json { & $curl -sS "$GtApi/releases/$releaseId/attach_files?access_token=$token" }
+    $attach = Invoke-Json { & $curl $curlArgs -sS "$GtApi/releases/$releaseId/attach_files?access_token=$token" }
     if ($attach) {
         foreach ($a in @($attach)) {
             if ($a.name -match '\.apk$' -or $a.name -match '\.zip\.00[0-9]$') {
                 Write-Host "   删除旧附件 $($a.name) (id=$($a.id))" -ForegroundColor Yellow
-                & $curl -sS -X DELETE "$GtApi/releases/$releaseId/attach_files/$($a.id)?access_token=$token" | Out-Null
+                & $curl $curlArgs -sS -X DELETE "$GtApi/releases/$releaseId/attach_files/$($a.id)?access_token=$token" | Out-Null
             }
         }
     }
@@ -350,7 +352,7 @@ function Step-Gitee {
     # 上传分卷
     foreach ($p in $parts) {
         Write-Host "   上传 $($p.Name) ($([math]::Round($p.Length/1MB,2)) MB) ..."
-        $resp = Invoke-Json { & $curl -sS -X POST "$GtApi/releases/$releaseId/attach_files" -F "access_token=$token" -F "file=@$($p.FullName -replace '\\','/')" }
+        $resp = Invoke-Json { & $curl $curlArgs -sS -X POST "$GtApi/releases/$releaseId/attach_files" -F "access_token=$token" -F "file=@$($p.FullName -replace '\\','/')" }
         if ($resp -and $resp.browser_download_url) { Write-Host "     -> 成功" -ForegroundColor Green }
         else { Write-Warning "     -> 失败" }
     }
