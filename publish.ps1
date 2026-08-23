@@ -308,7 +308,7 @@ function Step-Gitee {
     } else {
         $bodyFile = Join-Path $env:TEMP "gt-release-$Tag.md"
         Write-Utf8File $bodyFile (Get-ReleaseBody)
-        $created = Invoke-Json { & $curl $curlArgs -sS -X POST "$GtApi/releases" --data-urlencode "access_token=$token" --data-urlencode "tag_name=$Tag" --data-urlencode "name=$Tag" --data-urlencode "body@$bodyFile" }
+        $created = Invoke-Json { & $curl $curlArgs -sS -X POST "$GtApi/releases" --data-urlencode "access_token=$token" --data-urlencode "tag_name=$Tag" --data-urlencode "name=$Tag" --data-urlencode "target_commitish=$GtBranch" --data-urlencode "body@$bodyFile" }
         if (-not ($created -and $created.id)) { throw "创建 Gitee release 失败" }
         $releaseId = $created.id
         Write-Host "   创建 Gitee release id=$releaseId" -ForegroundColor Green
