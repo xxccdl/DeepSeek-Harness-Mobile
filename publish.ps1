@@ -117,7 +117,9 @@ $ApkName= "app-release.apk"
 function Resolve-Curl {
     $c = Get-Command curl.exe -ErrorAction SilentlyContinue
     if (-not $c) { throw "未找到 curl.exe" }
-    return $c.Source
+    # Windows 自带的 curl 走 schannel，国内网络访问 GitHub/Gitee 时证书吊销检查
+    # （CRYPT_E_NO_REVOCATION_CHECK）会失败；用 --ssl-no-revoke 跳过吊销列表检查。
+    return @($c.Source, "--ssl-no-revoke")
 }
 
 function Resolve-7z {
