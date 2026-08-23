@@ -110,6 +110,11 @@ mmmbuto-node-pty-android-arm64-1.1.2.tgz
 /ui-check.png
 /ui-dump*.xml
 
+# ---- 签名备份 / 构建日志（含敏感信息，不入库） ----
+/android/backup-signing-key.js
+/android/build-release.log
+/android/keystore.properties
+
 # ---- iOS 暂不支持 ----
 /ios/
 /.bundle/

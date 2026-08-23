@@ -42,6 +42,42 @@ type WebViewHandle = {
   injectJavaScript: (data: string) => void;
 };
 
+// 华为/HarmonyOS 的 WebView 基于 Chromium 114，缺少较新的 AbortSignal.any（Chromium 116+）
+// 与部分内核缺失的 AbortSignal.timeout。dsh 客户端插件（apiproxy/fetch、llm 等）大量依赖
+// 这两个 API，缺失会在前端 JS 执行时抛 "AbortSignal.any is not a function"，
+// 导致 SPA 无法挂载、界面一直白屏/黑屏。这里在页面任何脚本执行前注入 polyfill。
+const ABORT_SIGNAL_POLYFILL = `(function () {
+  if (typeof AbortSignal === 'undefined') return;
+  if (typeof AbortSignal.any !== 'function') {
+    AbortSignal.any = function (signals) {
+      var controller = new AbortController();
+      var list = signals || [];
+      for (var i = 0; i < list.length; i++) {
+        var s0 = list[i];
+        if (s0 && s0.aborted) { controller.abort(s0.reason); return controller.signal; }
+      }
+      list.forEach(function (sig) {
+        if (sig && typeof sig.addEventListener === 'function') {
+          sig.addEventListener('abort', function () { controller.abort(sig.reason); }, { once: true });
+        }
+      });
+      return controller.signal;
+    };
+  }
+  if (typeof AbortSignal.timeout !== 'function') {
+    AbortSignal.timeout = function (ms) {
+      var controller = new AbortController();
+      setTimeout(function () {
+        var err;
+        try { err = new DOMException('The operation timed out.', 'TimeoutError'); }
+        catch (e) { err = new Error('Timeout'); err.name = 'TimeoutError'; }
+        controller.abort(err);
+      }, ms);
+      return controller.signal;
+    };
+  }
+})(); true;`;
+
 export default function ChatScreen({ port }: Props) {
   const webViewRef = useRef<WebViewHandle | null>(null);
   const [loading, setLoading] = useState(true);
@@ -232,6 +268,7 @@ export default function ChatScreen({ port }: Props) {
             domStorageEnabled
             allowFileAccess
             setSupportMultipleWindows={false}
+            injectedJavaScriptBeforeContentLoaded={ABORT_SIGNAL_POLYFILL}
             onLoadStart={markLoading}
             onLoadEnd={finishLoading}
             onError={() => {

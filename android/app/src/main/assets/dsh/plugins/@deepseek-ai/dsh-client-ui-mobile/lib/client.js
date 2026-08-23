@@ -8,23 +8,10 @@ window.__ModuleLoader__.load({
 		// onboarding（内测声明 → DeepSeek 配置）同时弹出会冲突，导致欢迎界面被配置界面顶掉。
 		// 提前写入 done 标记，仅阻止自动弹出；设置 → 使用教程 仍可通过 force 重跑。
 		try { localStorage.setItem("dsh.onboarding.done", "1"); } catch { /* storage unavailable */ }
-		//#region dark theme
-		// 移动端整体为深色视觉（启动画面 / 原生壳 / 输入法背景均深色），而 dsh 前端默认浅色
-		// 主题（body 无 data-ds-dark-theme）。这里强制切换为深色主题，使界面与 App 统一。
-		// 前端自身的主题切换逻辑不在此 bundle 内，故设置一次即生效（无需强锁）。
-		const applyDarkTheme = () => {
-			if (typeof document === "undefined" || document.body === null) return;
-			if (!document.body.hasAttribute("data-ds-dark-theme")) {
-				document.body.setAttribute("data-ds-dark-theme", "");
-			}
-		};
-		if (typeof document !== "undefined") {
-			if (document.readyState === "loading") {
-				document.addEventListener("DOMContentLoaded", applyDarkTheme, { once: true });
-			} else {
-				applyDarkTheme();
-			}
-		}
+		//#region theme
+		// 主题跟随 dsh 前端主题系统（用户可在设置 → 外观 选 浅色 / 深色 / 跟随系统）。
+		// 不再强制锁深色：dsh 前端通过 body[data-ds-dark-theme] + --dsw-* token 自动切换，
+		// 移动端只需正确适配两套配色（见下方 --dm-* 变量与 body[data-ds-dark-theme] 分支）。
 		//#endregion
 		//#region styles
 		// 手机端深度优化：单列会话布局、更大的触摸目标、键盘友好的输入区、拇指友好的滚动。
@@ -34,7 +21,8 @@ window.__ModuleLoader__.load({
 		// computeColumns 空间不足时自动隐藏详情列），此处不再覆盖 grid，避免锁死侧边栏展开。
 		const css = [
 			/* ── 全局：字体平滑、去除触屏点击高亮闪现（移出媒体查询，始终生效） ── */
-			":root{--dsh-mobile-breakpoint:860px}",
+			":root{--dsh-mobile-breakpoint:860px;--dm-title:#111418;--dm-muted:#5f6672;--dm-chip-bg:rgba(17,24,39,.04);--dm-chip-border:rgba(17,24,39,.08);--dm-chip-text:#3c4453;--dm-icon-btn-bg:rgba(17,24,39,.05);--dm-icon-btn-border:rgba(17,24,39,.08);--dm-icon-btn-text:#3c4453;--dm-accent:#4176e6;--dm-accent-text:#2f5fd0;--dm-accent-soft:rgba(65,118,230,.12);--dm-accent-border:rgba(65,118,230,.32);--dm-active-bg:rgba(17,24,39,.05);--dm-disabled-bg:rgba(17,24,39,.08);--dm-disabled-text:rgba(17,24,39,.28)}",
+			"body[data-ds-dark-theme]{--dm-title:#f2f4f8;--dm-muted:#98a0ae;--dm-chip-bg:rgba(255,255,255,.055);--dm-chip-border:rgba(255,255,255,.07);--dm-chip-text:#d5d9e3;--dm-icon-btn-bg:rgba(255,255,255,.05);--dm-icon-btn-border:rgba(255,255,255,.08);--dm-icon-btn-text:#d7dbe5;--dm-accent:#5a7bff;--dm-accent-text:#9db1ff;--dm-accent-soft:rgba(77,107,254,.18);--dm-accent-border:rgba(77,107,254,.35);--dm-active-bg:rgba(255,255,255,.06);--dm-disabled-bg:rgba(255,255,255,.1);--dm-disabled-text:rgba(255,255,255,.45)}",
 			"[data-slot=root]{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}",
 			"[data-slot=root] *{-webkit-tap-highlight-color:transparent}",
 			/* 深色主题下根容器背景与状态栏融合 */
@@ -42,6 +30,13 @@ window.__ModuleLoader__.load({
 			"body[data-ds-dark-theme] [data-slot=conversation]{background:var(--dsw-alias-bg-base, #0b0e14)}",
 			/* ── 窄屏适配：布局交给 dsh 原生 auto-collapse，这里只做「耐看」的视觉调优 ── */
 			"@media (max-width:860px){",
+			/* 侧边栏展开：浮层抽屉覆盖对话区，不挤压内容（否则 280px 侧边栏把对话挤到约 95px） */
+			"[data-slot=root] [class$=_frame]:not([data-sidebar-collapsed]){grid-template-columns:minmax(0,1fr) !important}",
+			"[data-slot=root] [class$=_frame]:not([data-sidebar-collapsed]) [class$=_sidebarCol]{position:fixed;left:0;top:0;bottom:0;z-index:40;box-shadow:0 12px 48px rgba(0,0,0,.35)}",
+			"[data-slot=root] [class$=_frame]:not([data-sidebar-collapsed]) [class$=_detailsCol]{display:none}",
+			/* 移动端无悬停：隐藏所有 hover/focus tooltip 气泡（按钮详情）。用 role=tooltip 精准锁定，
+			   避免误伤 MessageItem/GoalCommandInputView 的消息气泡（它们也复用 .bubble 类） */
+			"[role=tooltip]{display:none !important}",
 			"[data-slot=root] [class$=_detailsCol]{overflow:hidden}",
 			/* 会话内容全宽 + 舒适留白 */
 			"[data-slot=conversation] [class$=_root]{--dsh-chat-content-width:100% !important}",
@@ -63,7 +58,7 @@ window.__ModuleLoader__.load({
 			"[class$=_iconButton]{min-width:44px;min-height:44px}",
 			/* 触屏：弱化 hover 残留，增强按压反馈 */
 			"[role=treeitem]:hover,[class$=_iconButton]:hover{opacity:1}",
-			"[role=treeitem]:active{background:rgba(255,255,255,0.06)}",
+			"[role=treeitem]:active{background:var(--dm-active-bg)}",
 			"[class$=_iconButton]:active{transform:scale(0.93);opacity:0.78}",
 			/* 滚动条：细、圆润、回弹 */
 			"[data-conversation-scroll],[class$=_scroll]{--dsh-scrollbar-width:5px !important;scrollbar-width:thin;overscroll-behavior-y:contain}",
@@ -121,14 +116,14 @@ window.__ModuleLoader__.load({
 			"[data-slot=conversation] [data-phase=hero] [class$=_composerStack]>*{position:relative;z-index:1}",
 			"[data-slot=conversation] [data-phase=hero] [class$=_composerHero]{justify-content:center}",
 			"[data-slot=conversation] [data-phase=hero] [class$=_headline]{justify-content:center;gap:12px;margin-bottom:8px}",
-			"[data-slot=conversation] [data-phase=hero] [class$=_headlineText]{font-size:26px;font-weight:650;letter-spacing:.01em;color:#f2f4f8}",
+			"[data-slot=conversation] [data-phase=hero] [class$=_headlineText]{font-size:26px;font-weight:650;letter-spacing:.01em;color:var(--dm-title)}",
 			"[data-slot=conversation] [data-phase=hero] [class$=_fish]{transform:scale(1.08)}",
-			"[data-slot=conversation] [data-phase=hero] [class$=_previewBadge]{padding:3px 10px;border-radius:999px;background:rgba(77,107,254,.16);border:1px solid rgba(77,107,254,.28);color:#9db1ff;font-size:11px;font-weight:500}",
+			"[data-slot=conversation] [data-phase=hero] [class$=_previewBadge]{padding:3px 10px;border-radius:999px;background:var(--dm-accent-soft);border:1px solid var(--dm-accent-border);color:var(--dm-accent-text);font-size:11px;font-weight:500}",
 			"[data-slot=conversation] [data-phase=hero] [class$=_heroWorkspaceRow]{justify-content:center;align-items:center;gap:10px;margin-top:2px}",
 			/* 空态选择器：工作区 + 模式 → 圆润胶囊（毛玻璃质感、品牌蓝点缀） */
-			"[data-slot=conversation] [data-phase=hero] [class$=_workspace],[data-slot=conversation] [data-phase=hero] [class$=_seat]{height:34px;padding:0 12px;border-radius:999px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.07);color:#d5d9e3;font-size:13px;font-weight:500;transition:background .16s,border-color .16s}",
-			"[data-slot=conversation] [data-phase=hero] [class$=_workspace]:active,[data-slot=conversation] [data-phase=hero] [class$=_seat]:active{background:rgba(77,107,254,.14)}",
-			"[data-slot=conversation] [data-phase=hero] [class$=_seatIcon]{color:#8ea2ff}",
+			"[data-slot=conversation] [data-phase=hero] [class$=_workspace],[data-slot=conversation] [data-phase=hero] [class$=_seat]{height:34px;padding:0 12px;border-radius:999px;background:var(--dm-chip-bg);border:1px solid var(--dm-chip-border);color:var(--dm-chip-text);font-size:13px;font-weight:500;transition:background .16s,border-color .16s}",
+			"[data-slot=conversation] [data-phase=hero] [class$=_workspace]:active,[data-slot=conversation] [data-phase=hero] [class$=_seat]:active{background:var(--dm-accent-soft)}",
+			"[data-slot=conversation] [data-phase=hero] [class$=_seatIcon]{color:var(--dm-accent-text)}",
 			/* 输入栏：毛玻璃胶囊 + 柔和悬浮阴影（DeepSeek 质感） */
 			"[data-composer-card]{border-radius:26px}",
 			"body[data-ds-dark-theme] [data-composer-card]{background:linear-gradient(180deg,rgba(28,31,40,.86),rgba(19,21,29,.9));backdrop-filter:blur(26px) saturate(1.5);-webkit-backdrop-filter:blur(26px) saturate(1.5);border:1px solid rgba(255,255,255,.08);box-shadow:0 14px 44px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.045)}",
@@ -136,18 +131,18 @@ window.__ModuleLoader__.load({
 			/* 输入栏工具行：+ 号与选择器胶囊化。_row 用直接子选择器——
 			   ContextMeter 面板内的统计行也是 [class$=_row]，不能被输入栏行距规则污染。 */
 			"[data-composer-card] > [class$=_row]{padding:2px 10px 8px}",
-			"[data-composer-card] [class$=_add]{width:36px;height:36px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);color:#d7dbe5;transition:background .16s,transform .16s,border-color .16s}",
-			"[data-composer-card] [class$=_add]:active{background:rgba(77,107,254,.22);border-color:rgba(77,107,254,.35);transform:scale(.9)}",
+			"[data-composer-card] [class$=_add]{width:36px;height:36px;background:var(--dm-icon-btn-bg);border:1px solid var(--dm-icon-btn-border);color:var(--dm-icon-btn-text);transition:background .16s,transform .16s,border-color .16s}",
+			"[data-composer-card] [class$=_add]:active{background:var(--dm-accent-soft);border-color:var(--dm-accent-border);transform:scale(.9)}",
 			/* 权限/模型选择器胶囊化。用 :has(triggerLabel) 排除 ContextMeter 圆环按钮
 			   （它同样是 [class$=_trigger] 但无 triggerLabel 子元素，不能被压成胶囊）。 */
-			"[data-composer-card] [class$=_trigger]:has([class$=_triggerLabel]){height:30px;padding:0 10px;border-radius:999px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.07);color:#d2d6e0;font-size:12.5px;transition:background .16s,border-color .16s}",
-			"[data-composer-card] [class$=_trigger]:has([class$=_triggerLabel]):active{background:rgba(255,255,255,.11)}",
+			"[data-composer-card] [class$=_trigger]:has([class$=_triggerLabel]){height:30px;padding:0 10px;border-radius:999px;background:var(--dm-chip-bg);border:1px solid var(--dm-chip-border);color:var(--dm-chip-text);font-size:12.5px;transition:background .16s,border-color .16s}",
+			"[data-composer-card] [class$=_trigger]:has([class$=_triggerLabel]):active{background:var(--dm-active-bg)}",
 			"[data-composer-card] [class$=_triggerLabel]{max-width:124px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-			"[data-composer-card] [class$=_triggerEffort]{margin-left:6px;padding:2px 7px;border-radius:999px;background:rgba(77,107,254,.18);color:#9db1ff;font-size:11px;font-weight:600}",
+			"[data-composer-card] [class$=_triggerEffort]{margin-left:6px;padding:2px 7px;border-radius:999px;background:var(--dm-accent-soft);color:var(--dm-accent-text);font-size:11px;font-weight:600}",
 			/* 发送按钮：品牌蓝渐变 + 发光；空态灰圆、有内容点亮 */
 			"[data-composer-card] [class$=_primary]{width:38px;height:38px;background:linear-gradient(135deg,#6e89ff,#4d6bfe);box-shadow:0 5px 18px rgba(77,107,254,.42);opacity:1;transition:transform .16s,box-shadow .16s}",
 			"[data-composer-card] [class$=_primary]:active:not(:disabled){transform:scale(.92)}",
-			"[data-composer-card] [class$=_primary]:disabled{background:rgba(255,255,255,.1);box-shadow:none;color:rgba(255,255,255,.45)}",
+			"[data-composer-card] [class$=_primary]:disabled{background:var(--dm-disabled-bg);box-shadow:none;color:var(--dm-disabled-text)}",
 			/* 设置页：分组卡片式，横向胶囊导航（选中态品牌蓝） */
 			"[class$=_panel][role=dialog] [class$=_navCell]{border-radius:999px}",
 			"[class$=_panel][role=dialog] [class$=_navCell].active{background:rgba(77,107,254,.16)}",
@@ -295,7 +290,6 @@ window.__ModuleLoader__.load({
 			mask.querySelector(".dmw-skip")?.addEventListener("click", doneAll);
 		};
 		const startWelcome = () => {
-			applyDarkTheme();
 			showWelcome();
 		};
 		if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startWelcome, { once: true });
