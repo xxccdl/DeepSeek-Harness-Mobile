@@ -7,8 +7,10 @@ import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -42,23 +44,65 @@ class PhoneAccessibilityService : AccessibilityService() {
     const val SERVICE_ID = "com.dshmobile/.PhoneAccessibilityService"
 
     /**
-     * 服务是否已启用。优先看服务实例是否存活；否则用 AccessibilityManager 的
-     * getEnabledAccessibilityServiceList() 查询（官方 API，不受系统设置字符串
-     * 格式差异影响，比读 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES 可靠）。
+     * 服务是否在系统设置中开启。
+     *
+     * 三层判定，逐层兜底（任一命中即视为已开启）：
+     *  1. 服务实例存活（onServiceConnected 已被系统回调，进程内状态最可靠）。
+     *  2. AccessibilityManager.getEnabledAccessibilityServiceList()（官方 API，但部分设备
+     *     只返回「已实例化的服务」，进程重启/未绑定时会漏判，导致设置已开却报未开）。
+     *  3. Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES + ACCESSIBILITY_ENABLED 字符串匹配
+     *     （直接反映「用户是否在系统无障碍设置里勾选了本服务」，跨设备最稳）。
+     *
+     * 第 3 层兜底解决「设置里明明已开启，但顶部栏/设置页显示未开启」的矛盾。
      */
     fun isEnabled(context: Context? = null): Boolean {
       if (instance != null) return true
       val ctx = context ?: instance?.applicationContext ?: return false
-      return runCatching {
+      // 第 2 层：官方 AccessibilityManager 查询
+      val managerMatch = runCatching {
         val am = ctx.getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
         am.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
           .any { info ->
             val si = info.resolveInfo?.serviceInfo ?: return@any false
-            // serviceInfo.name 是完整类名（com.dshmobile.PhoneAccessibilityService），
-            // 不能和 simpleName 比较（永远 false）。
             si.packageName == ctx.packageName && si.name == PhoneAccessibilityService::class.java.name
           }
       }.getOrDefault(false)
+      if (managerMatch) return true
+      // 第 3 层：读系统设置字符串兜底（最能如实反映「设置中已开启」）
+      return runCatching {
+        val enabled = Settings.Secure.getInt(ctx.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1
+        if (!enabled) return@runCatching false
+        val flat = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return@runCatching false
+        // 系统存储的服务标识存在多种格式，需全部兼容：
+        //   - com.dshmobile/com.dshmobile.PhoneAccessibilityService（完整类名，部分机型）
+        //   - com.dshmobile/.PhoneAccessibilityService（短格式，ComponentName.flattenToString 输出）
+        //   - 仅 /com.dshmobile.PhoneAccessibilityService 片段（个别定制 ROM）
+        val pkg = ctx.packageName // com.dshmobile
+        flat.split(':').any { entry ->
+          val e = entry.trim()
+          if (e.isEmpty()) return@any false
+          if (!e.startsWith(pkg)) return@any false
+          // 去掉包名前缀后，剩余部分必须引用 PhoneAccessibilityService
+          val rest = e.removePrefix(pkg) // 形如 "/.PhoneAccessibilityService" 或 "/com.dshmobile.PhoneAccessibilityService"
+          rest.contains("PhoneAccessibilityService")
+        }
+      }.getOrDefault(false)
+    }
+
+    /**
+     * 等待服务实例建立（onServiceConnected 已回调）。服务在系统设置中被开启后，
+     * 系统需异步绑定，instance 会在 1-2 秒内就绪。读屏/截屏/操作前调用避免误报
+     * 「服务未就绪」。最多等待 [timeoutMs]。
+     * @return 就绪的服务实例；超时仍未就绪则返回 null。
+     */
+    fun waitForInstance(timeoutMs: Long = 3000): PhoneAccessibilityService? {
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (System.currentTimeMillis() < deadline) {
+        val s = instance
+        if (s != null) return s
+        try { Thread.sleep(150) } catch (_: InterruptedException) { break }
+      }
+      return instance
     }
   }
 
@@ -151,6 +195,7 @@ class PhoneAccessibilityService : AccessibilityService() {
       val arr = JSONArray()
       walk(node, arr, 0)
       val out = JSONObject()
+      out.put("ok", true)
       out.put("elements", arr)
       val bounds = Rect()
       node.getBoundsInScreen(bounds)
@@ -453,5 +498,60 @@ class PhoneAccessibilityService : AccessibilityService() {
       return if (started) JSONObject().put("ok", true).put("package", pkg)
       else JSONObject().put("ok", false).put("error", "启动应用失败：$pkg")
     }
+  }
+
+  // ── 截屏（供视觉识别工具调用） ──────────────────────────────────────────
+
+  /**
+   * 截取当前屏幕，返回 base64 编码的 PNG。需要 API 30+（R）。
+   * 在主线程发起，阻塞等待回调（最长 5 秒）。
+   */
+  fun takeScreenshotBase64(): String? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+    val latch = CountDownLatch(1)
+    val holder = AtomicReference<String?>(null)
+    val error = AtomicReference<String?>(null)
+    mainHandler.post {
+      try {
+        takeScreenshot(
+          android.view.Display.DEFAULT_DISPLAY,
+          mainExecutor,
+          object : AccessibilityService.TakeScreenshotCallback {
+            override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+              try {
+                val hwBuffer = result.hardwareBuffer
+                val bitmap = android.graphics.Bitmap.wrapHardwareBuffer(hwBuffer, result.colorSpace)
+                if (bitmap != null) {
+                  val out = java.io.ByteArrayOutputStream()
+                  bitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false)?.compress(
+                    android.graphics.Bitmap.CompressFormat.PNG, 90, out
+                  )
+                  if (out.size() == 0) {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, out)
+                  }
+                  holder.set(android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP))
+                  bitmap.recycle()
+                }
+                hwBuffer.close()
+              } catch (e: Exception) {
+                error.set(e.message)
+              } finally {
+                latch.countDown()
+              }
+            }
+            override fun onFailure(errorCode: Int) {
+              error.set("截屏失败，错误码：$errorCode")
+              latch.countDown()
+            }
+          },
+        )
+      } catch (e: Exception) {
+        error.set(e.message)
+        latch.countDown()
+      }
+    }
+    latch.await(5, TimeUnit.SECONDS)
+    error.get()?.let { throw RuntimeException(it) }
+    return holder.get()
   }
 }

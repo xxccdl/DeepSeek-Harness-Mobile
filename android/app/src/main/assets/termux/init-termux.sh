@@ -49,6 +49,9 @@ export DSH_TELEMETRY_DISABLED=1
 # ── 飞速启动快速路径 ──────────────────────────────────────────────
 # 环境已完成（node/dsh 引擎在位）且内嵌 bundle 未变化（未升级 APK）时，
 # 直接跳过全部解压/安装/链接步骤，秒进 dsh 界面。
+# 注意：必须校验 proot-distro 可执行文件与 Debian 容器都就位——旧版环境
+# 可能在 proot-distro.dat 捆绑前初始化，仅校验 bin/proot 会把「缺 proot-distro」
+# 误判为已就绪而跳过补装，导致 bash 工具 spawn proot-distro ENOENT。
 BUNDLE_DAT="$DSH_BUNDLE/dsh-bundle.dat"
 BUNDLE_SIZE="0"
 [ -f "$BUNDLE_DAT" ] && BUNDLE_SIZE="$(wc -c < "$BUNDLE_DAT" | tr -d ' ')"
@@ -56,6 +59,9 @@ ENV_DONE="$DSH_HOME/.env-done"
 if [ -f "$ENV_DONE" ] && [ -x "$PREFIX/bin/node" ] && [ -x "$PREFIX/bin/dsh" ] \
   && [ -f "$PREFIX/lib/node_modules/@deepseek-ai/dsh/lib/bin.js" ] \
   && [ -x "$PREFIX/bin/proot" ] && [ -x "$PREFIX/bin/python3.14" ] \
+  && [ -x "$PREFIX/bin/proot-distro" ] \
+  && [ -f "$PREFIX/lib/python3.14/site-packages/proot_distro/cli.py" ] \
+  && [ -d "$PREFIX/var/lib/proot-distro/containers/debian/rootfs" ] \
   && [ "$BUNDLE_SIZE" = "$(cat "$ENV_DONE" 2>/dev/null | tr -d ' ')" ]; then
   echo "==> 环境已就绪，跳过初始化（飞速启动）"
   exit 0
@@ -138,10 +144,21 @@ else
 fi
 
 echo "==> 安装 proot-distro 运行时（内嵌 proot-distro.dat，无需联网）"
-if [ -x "$PREFIX/bin/proot" ] && [ -x "$PREFIX/bin/python3.14" ]; then
+# 必须连 proot-distro 命令一起校验：旧版环境可能在 proot-distro.dat 捆绑前初始化，
+# 仅有 proot/python3.14 却缺 proot-distro 命令与 Debian 容器，会导致 bash 工具
+# spawn proot-distro ENOENT。缺任一即重新解压 proot-distro.dat 补齐。
+# 关键库校验：旧版环境可能残留指向开发机绝对路径（//?/D:/...）的失效符号链接，
+# 导致 node 缺 libsqlite3.so、apt 缺 libbz2.so.1.0 而无法链接。缺任一即重新解压
+# proot-distro.dat（已实体化为真实文件）覆盖这些失效链接。
+if [ -x "$PREFIX/bin/proot" ] && [ -x "$PREFIX/bin/python3.14" ] \
+  && [ -x "$PREFIX/bin/proot-distro" ] \
+  && [ -f "$PREFIX/lib/python3.14/site-packages/proot_distro/cli.py" ] \
+  && [ -f "$PREFIX/lib/libsqlite3.so" ] && [ -f "$PREFIX/lib/libbz2.so.1.0" ]; then
   echo "   proot-distro 运行时已就绪，跳过"
 elif [ -f "$DSH_BUNDLE/proot-distro.dat" ]; then
-  tar -xzf "$DSH_BUNDLE/proot-distro.dat" -C "$PREFIX"
+  # proot-distro.dat 的 tar 顶层是 usr/（usr/bin/proot、usr/lib/...），
+  # 必须解到 $PREFIX 的父目录（files），再落入 $PREFIX/bin 与 $PREFIX/lib。
+  tar -xzf "$DSH_BUNDLE/proot-distro.dat" -C "${PREFIX%/usr}"
   chmod +x "$PREFIX/bin/proot" "$PREFIX/bin/proot-distro" "$PREFIX/bin/pd" \
     "$PREFIX/bin/python3.14" "$PREFIX/libexec/proot/loader" "$PREFIX/libexec/proot/loader32" 2>/dev/null || true
   echo "   proot-distro 运行时已就绪"
@@ -149,12 +166,39 @@ else
   echo "!! 未找到 proot-distro.dat，跳过 Debian 环境"
 fi
 
-echo "==> 安装 Debian 容器（内嵌 debian-rootfs.tar.gz，无需联网）"
+# 修复 proot-distro / pd 的 shebang：内嵌时把解释器硬编码为 /data/data/com.termux 前缀，
+# 在第三方 App 内无法执行（bad interpreter: Permission denied）。改写为实际前缀的 python3.14。
+# 该步骤在「跳过解压」时也执行，保证既有环境同样自愈。
+for __pd in "$PREFIX/bin/proot-distro" "$PREFIX/bin/pd"; do
+  if [ -f "$__pd" ] && [ -x "$PREFIX/bin/python3.14" ]; then
+    "$PREFIX/bin/python3.14" - "$__pd" "$PREFIX/bin/python3.14" <<'PYFIX' 2>/dev/null || true
+import sys
+p, py = sys.argv[1], sys.argv[2]
+try:
+    with open(p, 'r', encoding='utf-8', errors='surrogateescape') as f:
+        lines = f.readlines()
+except OSError:
+    sys.exit(0)
+if lines and lines[0].startswith('#!') and 'com.termux' in lines[0]:
+    lines[0] = '#!' + py + '\n'
+    with open(p, 'w', encoding='utf-8', errors='surrogateescape') as f:
+        f.writelines(lines)
+PYFIX
+    chmod +x "$__pd"
+  fi
+done
+
+echo "==> 安装 Debian 容器（内嵌 debian-rootfs，无需联网）"
 DEBIAN_ROOTFS="$PREFIX/var/lib/proot-distro/containers/debian/rootfs"
+# 兼容 .tar.gz 与 .tar 两种打包名（proot-distro install 依 tarfile 自动识别格式）
+ROOTFS_ARC=""
+for cand in "$DSH_BUNDLE/debian-rootfs.tar.gz" "$DSH_BUNDLE/debian-rootfs.tar"; do
+  if [ -f "$cand" ]; then ROOTFS_ARC="$cand"; break; fi
+done
 if [ -d "$DEBIAN_ROOTFS" ]; then
   echo "   Debian 已存在，跳过"
-elif [ -x "$PREFIX/bin/proot-distro" ] && [ -f "$DSH_BUNDLE/debian-rootfs.tar.gz" ]; then
-  "$PREFIX/bin/proot-distro" install "$DSH_BUNDLE/debian-rootfs.tar.gz" --name debian 2>&1 | tail -8 || true
+elif [ -x "$PREFIX/bin/proot-distro" ] && [ -n "$ROOTFS_ARC" ]; then
+  "$PREFIX/bin/proot-distro" install "$ROOTFS_ARC" --name debian 2>&1 | tail -8 || true
   echo "   Debian 已安装"
 else
   echo "!! 缺少 proot-distro 或 rootfs，跳过 Debian 安装"
@@ -175,6 +219,39 @@ if [ -d "$DEBIAN_ROOTFS" ] && [ -f "$PREFIX/etc/tls/cert.pem" ]; then
   fi
 else
   echo "!! 缺少 Debian 或 cert.pem，跳过 CA 证书补齐"
+fi
+
+echo "==> 安装 Debian 容器内基础工具 nodejs/git/curl/wget（apt，需联网）"
+# 最小 rootfs 只含 python3/dpkg，node/git/curl 缺失时 AI 在容器内无法用这些工具；
+# 且宿主 Termux 的 node 是 bionic 链接，在 glibc 容器内会 CANNOT LINK（损坏）。
+# 这里装 Debian 原生 glibc 版本，彻底规避宿主二进制泄漏带来的“node/python 损坏”。
+if [ -d "$DEBIAN_ROOTFS" ] && [ -x "$PREFIX/bin/proot-distro" ]; then
+  if [ ! -x "$DEBIAN_ROOTFS/usr/bin/node" ] || [ ! -x "$DEBIAN_ROOTFS/usr/bin/curl" ]; then
+    echo "   缺少 node/curl，执行 apt 安装（首次可能较慢，请稍候）..."
+    # 注意：不能把 apt 输出接到 | tail（proot 下子进程残留会让管道不闭合、login 不返回），
+    # 改为重定向到容器内日志文件；外面用 timeout 兜底，避免任何情况下挂死初始化。
+    # 后台心跳循环每 15s 输出一行进度：apt 安装耗时可能达数分钟且全程静默，
+    # 无进度会让 App 的启动超时逻辑误报「启动超时」。
+    ( __n=0; while [ "$__n" -lt 32 ]; do sleep 15; echo "   Debian 基础工具安装中…"; __n=$((__n+1)); done ) &
+    __hb=$!
+    # 容器源默认是 mirrors.aliyun.com 且其 https 证书在 proot 下验证失败（certificate
+    # verify failed），导致 apt 下载 nodejs 等全部失败。这里把 sources.list 直接重写为
+    # 清华源，并关闭 https 证书校验规避该问题；后续容器内所有 apt 操作默认走清华源。
+    if ! timeout 480 "$PREFIX/bin/proot-distro" login debian \
+      -e PROOT_LOADER="$PREFIX/libexec/proot/loader" \
+      -e PROOT_LOADER_32="$PREFIX/libexec/proot/loader32" \
+      -e PROOT_TMP_DIR="${TMPDIR}" \
+      -- bash -c 'export DEBIAN_FRONTEND=noninteractive; CODENAME=$(grep -oP "(?<=VERSION_CODENAME=)\S+" /etc/os-release 2>/dev/null || echo stable); printf "deb https://mirrors.tuna.tsinghua.edu.cn/debian %s main contrib non-free non-free-firmware\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian %s-updates main contrib non-free non-free-firmware\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian-security %s-security main contrib non-free non-free-firmware\n" "$CODENAME" "$CODENAME" "$CODENAME" > /etc/apt/sources.list; rm -f /etc/apt/sources.list.d/* 2>/dev/null; apt-get -o Acquire::https::Verify-Peers=false -o Acquire::https::Verify-Host=false update -y >/dev/null 2>&1; apt-get -o Acquire::https::Verify-Peers=false -o Acquire::https::Verify-Host=false install -y --no-install-recommends nodejs curl wget ca-certificates >/var/log/dsh-mobile-apt.log 2>&1' >/dev/null 2>&1; then
+      echo "   （apt 安装未能完全结束或超时，后续可由 AI 补装）"
+    fi
+    kill "$__hb" 2>/dev/null || true
+    wait "$__hb" 2>/dev/null || true
+    echo "   Debian 基础工具安装步骤结束"
+  else
+    echo "   Debian 基础工具已就绪，跳过"
+  fi
+else
+  echo "!! 缺少 Debian 或 proot-distro，跳过基础工具安装"
 fi
 
 echo "==> 创建 dsh 命令（node wrapper → \$PREFIX/bin/dsh）"

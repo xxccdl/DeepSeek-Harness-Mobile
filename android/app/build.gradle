@@ -72,6 +72,17 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+// Release 签名配置：从 android/keystore.properties 读取（本地生成，不入库）。
+// 仓库克隆者没有该文件时回退到 debug 签名，保证可直接构建。
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+// 通过 ext 暴露给 signingConfigs/buildTypes 闭包，避免 DSL delegate 解析歧义
+ext.hasReleaseKeystore = keystorePropertiesFile.exists()
+ext.keystoreProps = keystoreProperties
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -82,8 +93,8 @@ android {
         applicationId "com.dshmobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 4
+        versionName "1.0.2"
     }
     signingConfigs {
         debug {
@@ -92,15 +103,22 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release {
+            if (project.ext.hasReleaseKeystore) {
+                storeFile file(project.ext.keystoreProps['storeFile'])
+                storePassword project.ext.keystoreProps['storePassword']
+                keyAlias project.ext.keystoreProps['keyAlias']
+                keyPassword project.ext.keystoreProps['keyPassword']
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // 有 release keystore 用正式签名，否则回退 debug 签名（开源仓库可直接构建）
+            signingConfig project.ext.hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
             // 便于真机调试（run-as 可用 + 日志）；正式发布前移除

@@ -7,7 +7,7 @@
  */
 
 import React, { useEffect, useRef } from 'react';
-import { Animated, Dimensions, Easing, StyleSheet, View } from 'react-native';
+import { Animated, Dimensions, Easing, StyleSheet, Text, View } from 'react-native';
 import Svg, {
   ClipPath,
   Defs,
@@ -38,7 +38,7 @@ const Wordmark = ({ fill }: { fill: string }) => (
   </SvgText>
 );
 
-export default function SplashScreen() {
+export default function SplashScreen({ status }: { status?: string | null }) {
   // 0→1：光带从左扫到右
   const shimmer = useRef(new Animated.Value(0)).current;
 
@@ -102,6 +102,8 @@ export default function SplashScreen() {
           />
         </G>
       </Svg>
+      {/* 初始化进度：底部一行小字，仅首次初始化时显示，不打扰动画 */}
+      {status ? <Text style={styles.status} numberOfLines={2}>{status}</Text> : null}
     </View>
   );
 }
@@ -110,5 +112,15 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+  status: {
+    position: 'absolute',
+    left: 32,
+    right: 32,
+    bottom: 56,
+    color: '#5b6472',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
   },
 });

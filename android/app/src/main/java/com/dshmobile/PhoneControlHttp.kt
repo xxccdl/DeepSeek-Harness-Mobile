@@ -135,19 +135,57 @@ object PhoneControlHttp {
         JSONObject().put("ok", true).put("enabled", enabled)
           .put("service", PhoneAccessibilityService.SERVICE_ID).toString()
 
+      method == "GET" && path == "/api/floatball" ->
+        JSONObject().put("ok", true)
+          .put("supported", true)
+          .put("permission", FloatingBallService.hasPermission(appContext))
+          .put("enabled", FloatingBallService.isRunning()).toString()
+
+      method == "GET" && path == "/api/version" ->
+        JSONObject().put("ok", true)
+          .put("versionName", BuildConfig.VERSION_NAME)
+          .put("versionCode", BuildConfig.VERSION_CODE)
+          .put("package", appContext?.packageName ?: "").toString()
+
+      method == "GET" && path == "/api/screenshot" -> {
+        if (!enabled) notEnabled()
+        else {
+          val service = PhoneAccessibilityService.waitForInstance(3000)
+          if (service == null) {
+            JSONObject().put("ok", false).put("error", "无障碍服务尚未就绪，请稍候重试").toString()
+          } else {
+            try {
+              val b64 = service.takeScreenshotBase64()
+              if (b64 != null) JSONObject().put("ok", true).put("data", b64).toString()
+              else JSONObject().put("ok", false).put("error", "截屏需要 Android 11 (API 30) 或更高版本").toString()
+            } catch (e: Exception) {
+              JSONObject().put("ok", false).put("error", "截屏失败：${e.message}").toString()
+            }
+          }
+        }
+      }
+
       method == "GET" && path == "/api/screen" ->
-        if (enabled && PhoneAccessibilityService.instance != null)
-          PhoneAccessibilityService.instance?.dumpScreen()?.toString()
-            ?: JSONObject().put("ok", false).put("error", "服务未就绪，请稍后重试").toString()
-        else if (enabled) JSONObject().put("ok", false).put("error", "无障碍服务已在设置中开启，但实例尚未就绪，请稍候 1-2 秒重试").toString()
-        else notEnabled()
+        if (!enabled) notEnabled()
+        else {
+          // 设置中已开启但实例可能尚未绑定，先等待就绪再读屏
+          val service = PhoneAccessibilityService.waitForInstance(3000)
+          if (service == null) {
+            JSONObject().put("ok", false)
+              .put("error", "无障碍服务尚未就绪：请确认已在系统「无障碍」中开启本服务，且保持应用在前台运行；可关闭重开一次无障碍开关后重试")
+              .toString()
+          } else {
+            service.dumpScreen()?.toString()
+              ?: JSONObject().put("ok", false).put("error", "服务未就绪，请稍后重试").toString()
+          }
+        }
 
       method == "POST" && path == "/api/action" -> {
         if (!enabled) return notEnabled()
-        val service = PhoneAccessibilityService.instance
+        val service = PhoneAccessibilityService.waitForInstance(3000)
         if (service == null) {
           return JSONObject().put("ok", false)
-            .put("error", "无障碍服务实例尚未就绪（设置中已开启，正在绑定），请稍候重试").toString()
+            .put("error", "无障碍服务尚未就绪（设置中已开启，正在绑定），请稍候重试或关闭重开无障碍开关").toString()
         }
         val payload = try { JSONObject(body) } catch (_: Exception) {
           return JSONObject().put("ok", false).put("error", "请求体不是合法 JSON").toString()

@@ -7,6 +7,7 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableMap
 import android.Manifest
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -14,9 +15,13 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.FileObserver
+import android.provider.MediaStore
+import android.util.Base64
 import android.util.Log
+import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -75,6 +80,10 @@ class TermuxEngineModule(private val reactContext: ReactApplicationContext) :
       "PROOT_TMP_DIR" to File(filesDir, "tmp").absolutePath,
       // node 编译期默认 /data/data/com.termux 路径，用 OPENSSL_CONF 指向实际前缀
       "OPENSSL_CONF" to "$prefix/etc/tls/openssl.cnf",
+      // 显式指定 CA 证书捆绑包：宿主 node 做 HTTPS（调用模型 API 等）时，
+      // 若 OpenSSL 配置未正确加载会报 "unable to get local issuer certificate"。
+      // 指向 Termux 的 Mozilla CA，确保 fetch/https 在任何情况下都能校验。
+      "SSL_CERT_FILE" to "$prefix/etc/tls/cert.pem",
       // 手机版：AI 的 bash 工具改在 proot-distro Debian 容器内执行
       "DSH_MOBILE_PROOT" to "1",
       // 宿主 files 目录（proot-distro 内需要把工作区 bind 进来，AI 才能访问项目文件）
@@ -144,6 +153,7 @@ class TermuxEngineModule(private val reactContext: ReactApplicationContext) :
     prefixDir.mkdirs()
     homeDir.mkdirs()
     File(filesDir, "tmp").mkdirs()
+    emitProgress("正在部署运行环境…", 1)
     // 每次启动都部署路径重映射库（22KB，覆盖写保证与 APK 同步）：
     // apt/dpkg/proot-distro 读取编译期硬编码的 /data/data/com.termux/files，
     // 经 LD_PRELOAD 拦截 libc 文件 API 重写到真实前缀（termuxEnv 注入）。
@@ -256,12 +266,31 @@ class TermuxEngineModule(private val reactContext: ReactApplicationContext) :
     val bundle = File(dest, "dsh-bundle.dat")
     val marker = File(dest, ".bundle-ok")
     val assetSize = try { reactContext.assets.openFd("dsh/dsh-bundle.dat").length } catch (_: Exception) { -1L }
-    // proot-distro.dat 也必须就位：否则升级新增该文件时，因 dsh-bundle.dat 未变而漏拷到 <files>/dsh，
-    // 导致 init-termux.sh 找不到 proot-distro.dat（AI bash 无法进入 Debian 环境）。
+    // proot-distro.dat / debian-rootfs.tar.gz 也必须就位：否则升级新增该文件时，
+    // 因 dsh-bundle.dat 未变而漏拷到 <files>/dsh，init-termux.sh 找不到 proot-distro.dat
+    // 或 debian-rootfs.tar.gz，AI bash 无法进入 Debian 环境。
     val prootDat = File(dest, "proot-distro.dat")
-    if (bundle.exists() && bundle.length() == assetSize && marker.exists() && prootDat.exists()) return
-    copyAssetRecursive("dsh", dest)
+    // debian-rootfs 打包名可能为 .tar.gz 或 .tar，两种都存在即视为就位
+    val debianRootfs = File(dest, "debian-rootfs.tar.gz").exists() ||
+      File(dest, "debian-rootfs.tar").exists()
+    if (bundle.exists() && bundle.length() == assetSize && marker.exists() && prootDat.exists() && debianRootfs) return
+    // 增量补齐：仅复制缺失或大小不一致的顶层条目。升级时通常只有 dsh-bundle.dat
+    // 与 plugins/ 变化；debian-rootfs.tar(≈190MB)/node-runtime.dat/proot-distro.dat
+    // 不变则跳过——整目录重复复制既慢又长时间无进度事件，会让 App 启动超时误报。
+    val entries = try { reactContext.assets.list("dsh") } catch (_: Exception) { emptyArray() } ?: emptyArray()
+    for (name in entries) {
+      emitProgress("正在部署运行文件…", 3)
+      copyAssetEntryIfChanged("dsh/$name", File(dest, name))
+    }
     marker.writeText("ok")
+  }
+
+  /** 仅当目标缺失或资源大小不一致时复制单个 asset 条目（文件或目录）。 */
+  private fun copyAssetEntryIfChanged(assetPath: String, target: File) {
+    val assetLen = try { reactContext.assets.openFd(assetPath).length } catch (_: Exception) { -1L }
+    // 目录（openFd 抛异常 → -1）与大小不一致的文件都需要复制；大小一致的文件跳过
+    if (assetLen >= 0 && target.isFile && target.length() == assetLen) return
+    copyAssetRecursive(assetPath, target)
   }
 
   /** 递归复制 assets 资源：先尝试作为文件打开，失败则视为目录。 */
@@ -307,9 +336,14 @@ class TermuxEngineModule(private val reactContext: ReactApplicationContext) :
       bundleDat.exists() && bundleSizeMark.exists() &&
         bundleSizeMark.readText().trim().toLong() == bundleDat.length()
     }.getOrDefault(false)
-    // proot-distro 运行时也需就位（新装机升级补装 Debian 环境）
+    // proot-distro 运行时也需就位（新装机升级补装 Debian 环境）。
+    // 必须同时校验 bin/proot-distro 可执行文件与 Debian 容器：旧版环境可能在
+    // proot-distro.dat 捆绑前初始化，仅校验 bin/proot 会漏判「缺 proot-distro」，
+    // 导致 App 不重跑 init-termux.sh，bash 工具 spawn proot-distro ENOENT。
     val prootOk = File(prefixDir, "bin/proot").exists() && File(prefixDir, "bin/python3.14").exists() &&
-      File(prefixDir, "lib/python3.14/site-packages/proot_distro/cli.py").exists()
+      File(prefixDir, "lib/python3.14/site-packages/proot_distro/cli.py").exists() &&
+      File(prefixDir, "bin/proot-distro").exists() &&
+      File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs").isDirectory
     promise.resolve(envDone.exists() && dshBin.exists() && bundleFresh && prootOk)
   }
 
@@ -672,5 +706,135 @@ class TermuxEngineModule(private val reactContext: ReactApplicationContext) :
     notifyObserver = null
     try { dshProcess?.destroy() } catch (_: Exception) {}
     dshProcess = null
+  }
+
+  // ── 上传媒体（拍照 / 相册 / 文件）──────────────────────────────────────────
+  // 由 Web 端「+」上传面板触发：启动对应系统选择器，读取字节 → base64 回传 JS。
+  // 通过 addActivityEventListener 接收 onActivityResult（startActivityForResult）。
+
+  /** 请求码，用于区分相机 / 相册 / 文件。 */
+  private enum class PickKind { CAMERA, GALLERY, FILE }
+
+  private var pendingPick: PickKind? = null
+  private var pendingPickPromise: Promise? = null
+  private var cameraOutFile: File? = null
+
+  private val activityEventListener = object : com.facebook.react.bridge.ActivityEventListener {
+    override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+      val kind = pendingPick
+      val promise = pendingPickPromise
+      if (kind == null || promise == null) return
+      pendingPick = null
+      pendingPickPromise = null
+      resolvePick(promise, kind, requestCode, resultCode, data)
+    }
+    override fun onNewIntent(intent: Intent) { /* not used */ }
+  }
+
+  init { reactContext.addActivityEventListener(activityEventListener) }
+
+  @ReactMethod
+  fun pickMedia(kind: String, promise: Promise) {
+    try {
+      if (pendingPick != null) {
+        promise.reject("busy", "有一个媒体选择正在进行")
+        return
+      }
+      val activity = reactContext.currentActivity
+        ?: run { promise.reject("no_activity", "没有可用的 Activity"); return }
+      val pick = when (kind) {
+        "camera" -> PickKind.CAMERA
+        "gallery" -> PickKind.GALLERY
+        "file" -> PickKind.FILE
+        else -> run { promise.reject("bad_kind", "未知选择类型: $kind"); return }
+      }
+      val intent: Intent? = when (pick) {
+        PickKind.CAMERA -> {
+          // 拍照：把输出写到 cacheDir/camera（经 FileProvider 授权给系统相机）
+          val dir = File(reactContext.cacheDir, "camera")
+          dir.mkdirs()
+          val out = File(dir, "dsh_cam_${System.currentTimeMillis()}.jpg")
+          val uri: Uri = FileProvider.getUriForFile(
+            reactContext, "${reactContext.packageName}.fileprovider", out,
+          )
+          cameraOutFile = out
+          Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          }
+        }
+        PickKind.GALLERY -> Intent(Intent.ACTION_GET_CONTENT).apply {
+          type = "image/*"
+          addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        PickKind.FILE -> Intent(Intent.ACTION_GET_CONTENT).apply {
+          type = "*/*"
+          addCategory(Intent.CATEGORY_OPENABLE)
+        }
+      }
+      if (intent == null) { promise.reject("no_intent", "无法创建选择器"); return }
+      pendingPick = pick
+      pendingPickPromise = promise
+      activity.startActivityForResult(intent, pick.ordinal + 1000)
+    } catch (e: Exception) {
+      pendingPick = null
+      pendingPickPromise = null
+      promise.reject("pick_error", e.message ?: "pick error")
+    }
+  }
+
+  /** 读取选择结果 → base64 回传。取消时 resolve(null)。 */
+  private fun resolvePick(promise: Promise, kind: PickKind, requestCode: Int, resultCode: Int, data: Intent?) {
+    Thread {
+      try {
+        if (resultCode != Activity.RESULT_OK) {
+          promise.resolve(null)
+          return@Thread
+        }
+        val mime: String
+        val name: String
+        val bytes: ByteArray?
+        when (kind) {
+          PickKind.CAMERA -> {
+            val out = cameraOutFile
+            cameraOutFile = null
+            if (out == null || !out.exists()) { promise.resolve(null); return@Thread }
+            mime = "image/jpeg"
+            name = out.name
+            bytes = out.readBytes()
+          }
+          PickKind.GALLERY, PickKind.FILE -> {
+            val uri: Uri = data?.data ?: run { promise.resolve(null); return@Thread }
+            val resolver = reactContext.contentResolver
+            mime = resolver.getType(uri) ?: if (kind == PickKind.GALLERY) "image/jpeg" else "application/octet-stream"
+            var display = queryDisplayName(resolver, uri)
+            if (display.isNullOrBlank()) display = "upload_${System.currentTimeMillis()}"
+            name = display
+            bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+          }
+        }
+        if (bytes == null) { promise.resolve(null); return@Thread }
+        val map: WritableMap = Arguments.createMap()
+        map.putString("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+        map.putString("mime", mime)
+        map.putString("name", name)
+        promise.resolve(map)
+      } catch (e: Exception) {
+        promise.reject("read_error", e.message ?: "read error")
+      }
+    }.start()
+  }
+
+  /** 从 content resolver 读取显示名，失败返回 null。 */
+  private fun queryDisplayName(resolver: android.content.ContentResolver, uri: Uri): String? {
+    return try {
+      resolver.query(uri, null, null, null, null)?.use { cursor ->
+        if (!cursor.moveToFirst()) null
+        else {
+          val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+          if (idx >= 0) cursor.getString(idx) else null
+        }
+      }
+    } catch (_: Exception) { null }
   }
 }

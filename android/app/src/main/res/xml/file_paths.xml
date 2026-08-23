@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 相机拍照输出：存放在 cacheDir/camera 下，经 FileProvider 授权给相机应用写入 -->
+    <cache-path name="camera" path="camera/" />
+    <external-cache-path name="camera_ext" path="camera/" />
+</paths>

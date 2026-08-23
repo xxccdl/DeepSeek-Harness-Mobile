@@ -33,12 +33,15 @@ const EXTRA_PKGS = [
   "@deepseek-ai/dsh-tool-clipboard",
   "@deepseek-ai/dsh-tool-deliver",
   "@deepseek-ai/dsh-tool-phone",
+  "@deepseek-ai/dsh-tool-vision",
   "@deepseek-ai/dsh-client-ui-enhance",
   "@deepseek-ai/dsh-client-ui-snippets",
   "@deepseek-ai/dsh-client-ui-stats",
   "@deepseek-ai/dsh-client-ui-onboarding",
   "@deepseek-ai/dsh-client-ui-deliver",
   "@deepseek-ai/dsh-client-ui-phone-control",
+  "@deepseek-ai/dsh-client-ui-floatball",
+  "@deepseek-ai/dsh-client-ui-updatecheck",
   "@deepseek-ai/dsh-client-ui-mobile",
   "@deepseek-ai/dsh-mobile-bridge",
 ];
@@ -283,6 +286,34 @@ if (existsSync(webAppPatch)) {
   }
 }
 
+// 3.5d 悬浮球设置分区：在设置页注册「悬浮球」分区（悬浮窗权限 + 启停 + 状态）
+{
+  const c = readFileSync(webAppPatch, "utf8");
+  if (!c.includes("id: ui-floatball\n")) {
+    const anchor = "    - id: ui-phone-control\n      name: '@deepseek-ai/dsh-client-ui-phone-control'";
+    if (c.includes(anchor)) {
+      writeFileSync(webAppPatch, c.replace(anchor, anchor + "\n\n    - id: ui-floatball\n      name: '@deepseek-ai/dsh-client-ui-floatball'"));
+      console.log("  injected ui-floatball into dsh-web-app patch");
+    } else {
+      console.log("  !! ui-phone-control anchor not found; ui-floatball not injected");
+    }
+  }
+}
+
+// 3.5e 检查更新设置分区：抓取 GitHub release 对比版本，有新版时引导去 GitHub 下载
+{
+  const c = readFileSync(webAppPatch, "utf8");
+  if (!c.includes("id: ui-updatecheck\n")) {
+    const anchor = "    - id: ui-floatball\n      name: '@deepseek-ai/dsh-client-ui-floatball'";
+    if (c.includes(anchor)) {
+      writeFileSync(webAppPatch, c.replace(anchor, anchor + "\n\n    - id: ui-updatecheck\n      name: '@deepseek-ai/dsh-client-ui-updatecheck'"));
+      console.log("  injected ui-updatecheck into dsh-web-app patch");
+    } else {
+      console.log("  !! ui-floatball anchor not found; ui-updatecheck not injected");
+    }
+  }
+}
+
 // 3.6 把手机桥接插件注册进 dsh-base 的 patch：它订阅 dsh/notify 并把通知
 //    写入 <files>/notify 队列，由原生层 FileObserver 弹系统通知。
 //    紧邻 task-notify（dsh-tool-notify，真正 emit dsh/notify 的插件）。
@@ -331,6 +362,20 @@ if (existsSync(basePatch)) {
   }
 }
 
+// 3.6d AI 视觉识别工具：注册进 dsh-base patch，让 AI 能用 vision_analyze 分析图片/截屏
+{
+  const c = readFileSync(basePatch, "utf8");
+  if (!c.includes("tool-vision")) {
+    const anchor = "    - id: tool-phone\n      name: '@deepseek-ai/dsh-tool-phone'";
+    if (c.includes(anchor)) {
+      writeFileSync(basePatch, c.replace(anchor, anchor + "\n\n    - id: tool-vision\n      name: '@deepseek-ai/dsh-tool-vision'"));
+      console.log("  injected tool-vision into dsh-base patch");
+    } else {
+      console.log("  !! tool-phone anchor not found; tool-vision not injected");
+    }
+  }
+}
+
 // 3.7 手机版：AI 的 bash 工具改在 proot-distro Debian 容器内执行（完整 Linux 环境，
 //    apt/pip/glibc），而非受限于 Termux 前缀。bash-local 默认 `bash -c <command>`；
 //    在 staging 副本里改成 DSH_MOBILE_PROOT=1 时走 `proot-distro login debian -- bash -c ...`。
@@ -352,7 +397,12 @@ if (existsSync(basePatch)) {
 			const filesDir = process.env.DSH_MOBILE_FILES_DIR;
 			if (filesDir) args.push("--bind", filesDir);
 			if (workdir) args.push("--work-dir", workdir);
-			args.push("--", "bash", "-c", command);
+			// proot-distro login 总是把宿主 Termux $PREFIX/bin 追加到 PATH 末尾，
+			// 导致容器内 node/npm/python3.14/curl 解析到宿主 bionic 二进制而
+			// CANNOT LINK（glibc 容器缺 Termux 的 libz/libandroid-support）。
+			// 这里在容器内重置为 Debian 原生 PATH，宿主二进制不再泄漏。
+			const cleanPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+			args.push("--", "bash", "-c", "export PATH=" + cleanPath + " && " + command);
 			return args;
 		}
 		return ["bash", "-c", command];
@@ -400,12 +450,18 @@ if (existsSync(basePatch)) {
 	try { await removeStagingDir(stagingDir); } catch {}
 }
 async function writeFileAtomic(absolutePath, content, mode, signal, internals = {}, createIfAbsent) {
-	if (process.env.DSH_MOBILE_PROOT === "1") {
+	// 宿主 node 跑在 Android 上（process.platform === "android"）时 link() 发布临时文件
+	// 会 EACCES，同样需要回退直接写；DSH_MOBILE_PROOT=1 覆盖 bash 容器场景。
+	if (process.env.DSH_MOBILE_PROOT === "1" || process.platform === "android") {
 		try {
 			return await writeFileAtomicOriginal(absolutePath, content, mode, signal, internals, createIfAbsent);
 		} catch (error) {
-			const code = error?.code ?? error?.cause?.code;
-			if (code === "EACCES" || code === "EPERM" || code === "EXDEV") {
+			// FS_IO_ERROR 这类包装错误把真正 errno 放在 cause 里，需同时检查
+			// 顶层与 cause 的 code，否则 EACCES/EPERM/EXDEV 永远匹配不到。
+			const topCode = error?.code;
+			const causeCode = error?.cause?.code;
+			if (topCode === "EACCES" || topCode === "EPERM" || topCode === "EXDEV"
+				|| causeCode === "EACCES" || causeCode === "EPERM" || causeCode === "EXDEV") {
 				await dshMobileProotFallback(absolutePath, content, signal, internals);
 				return;
 			}

@@ -32,13 +32,27 @@ React Native (0.87) 壳层 + 原生 Android 模块：
 ## 目录结构
 
 ```
-app/
-├── android/                  # Android 原生工程（Kotlin 模块在 app/src/main/java/com/dshmobile/）
+├── android/                  # Android 原生工程（Kotlin 模块在 android/app/src/main/java/com/dshmobile/）
 ├── src/                      # React Native 界面（SplashScreen / InitScreen / ChatScreen）
 ├── scripts/                  # 资产构建脚本（bundle-dsh / pack-node-runtime 等）
 ├── proot-distro/             # proot-distro 打包脚本
+├── plugins/                  # dsh 插件源码（@deepseek-ai/*）
 └── ...
 ```
+
+## 插件
+
+本仓库 `plugins/@deepseek-ai/` 收录移动端用到的 dsh 插件源码，包括：
+
+- **手机控制**：`dsh-tool-phone` / `dsh-client-ui-phone-control`（无障碍读屏 + 点击/滑动/输入等）
+- **悬浮球**：`dsh-client-ui-floatball`
+- **产物交付**：`dsh-tool-deliver` / `dsh-client-ui-deliver`（一键保存到下载目录）
+- **检查更新**：`dsh-client-ui-updatecheck`
+- **移动端 UI 魔改**：`dsh-client-ui-mobile`（DeepSeek 风格、上传面板、窄屏适配）
+- **移动桥接**：`dsh-mobile-bridge`（通知/保存等原生桥接）
+- 以及 `dsh-tool-vision`、`dsh-tool-webfetch`、`dsh-tool-snippets`、`dsh-command-btw` 等
+
+插件通过 `scripts/bundle-dsh.mjs` 打进 `dsh-bundle.dat`（在 `EXTRA_PKGS` 中声明的包）。
 
 ## 构建（Android）
 
@@ -74,7 +88,10 @@ cd android
 
 生成 APK：`android/app/build/outputs/apk/release/app-release.apk`
 
-> ⚠️ 发布正式版前请生成自己的签名 keystore（当前 release 构建复用 debug keystore，仅用于开发调试）。
+> ⚠️ **签名**：仓库默认 release 构建复用 debug keystore（仅用于开发调试）。
+> 正式分发请在 `android/keystore.properties` 配置自己的 keystore（模板：
+> `storeFile`、`storePassword`、`keyAlias`、`keyPassword`，文件不入库）。
+> 存在该文件时自动使用正式签名，缺失时回退 debug 签名保证可直接构建。
 
 ## 使用
 

@@ -11,8 +11,8 @@
  *   merged/  python3.14 + stdlib + 原生依赖库
  *   libtalloc.deb / shmem.deb   libtalloc.so.2 / libandroid-shmem.so
  */
-import { cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { cpSync, existsSync, lstatSync, mkdirSync, rmSync, readdirSync, readlinkSync, statSync } from 'node:fs'
+import { join, dirname, resolve } from 'node:path'
 import { execSync } from 'node:child_process'
 
 const ROOT = 'd:/code/dsh-gui/dsh-mobile/app/proot-distro'
@@ -26,7 +26,8 @@ function mergeUsr(part) {
     console.log('!! missing ' + u)
     return
   }
-  cpSync(u, USR, { recursive: true, force: true })
+  // dereference: 把符号链接解引用为实体文件拷贝，避免链接指向开发机绝对路径
+  cpSync(u, USR, { recursive: true, force: true, dereference: true })
 }
 
 rmSync(STAGE, { recursive: true, force: true })
@@ -49,9 +50,50 @@ for (const deb of ['libtalloc.deb', 'shmem.deb']) {
   execSync(`tar -xf "${join(ROOT, deb)}" -C "${tmp}"`, { stdio: 'pipe' })
   execSync(`tar -xf "${join(tmp, 'data.tar.xz')}" -C "${tmp}"`, { stdio: 'pipe' })
   const srclib = join(tmp, 'data/data/com.termux/files/usr/lib')
-  if (existsSync(srclib)) cpSync(srclib, join(USR, 'lib'), { recursive: true, force: true })
+  if (existsSync(srclib)) cpSync(srclib, join(USR, 'lib'), { recursive: true, force: true, dereference: true })
   rmSync(tmp, { recursive: true, force: true })
 }
+
+/**
+ * 把 STAGE 里所有符号链接替换为真实文件拷贝（解引用实体化）。
+ * Windows cpSync 会把相对符号链接写成指向开发机绝对路径（如 //?/D:/...），
+ * 在 Android 上完全失效，导致 apt/node 等加载 .so 时找不到依赖库。
+ * 这里遍历替换成实体文件，确保包内不含任何指向开发机的链接。
+ */
+function dereferenceSymlinks(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name)
+    let st
+    try { st = lstatSync(p) } catch { continue }
+    if (entry.isDirectory()) {
+      dereferenceSymlinks(p)
+      continue
+    }
+    if (!st.isSymbolicLink()) continue
+    // 1) 正常路径：读链接目标并解引用（相对/本机绝对都试）
+    let real
+    try { real = readlinkSync(p) } catch { continue }
+    const absTarget = resolve(dirname(p), real)
+    if (existsSync(absTarget)) {
+      rmSync(p, { force: true })
+      cpSync(absTarget, p, { recursive: true, force: true, dereference: true })
+      continue
+    }
+    // 2) 兜底：链接指向开发机 Windows 绝对路径（node:path.resolve 会把 D:\ 当相对路径算错）。
+    //    此时同目录里必然有以"链接 basename"为前缀的实体文件（如 libtalloc.so → libtalloc.so.2.4.3），
+    //    取第一个匹配的实体文件复制过来，替换掉失效链接。
+    const base = entry.name
+    const siblings = readdirSync(dir).filter((f) => f !== base &&
+      (f === base || f.startsWith(base + '.')))
+    // 排除仍是链接的项，避免复制到自身
+    const realCand = siblings.find((f) => { try { return !lstatSync(join(dir, f)).isSymbolicLink() } catch { return false } })
+    if (realCand) {
+      rmSync(p, { force: true })
+      cpSync(join(dir, realCand), p, { recursive: true, force: true, dereference: true })
+    }
+  }
+}
+dereferenceSymlinks(USR)
 
 // 打包（prefix 相对：含 usr/ 根）
 rmSync(OUT, { force: true })

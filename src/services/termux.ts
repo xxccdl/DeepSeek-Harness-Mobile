@@ -7,6 +7,7 @@ import { NativeEventEmitter, NativeModules } from 'react-native';
 
 const TermuxEngine: any = NativeModules.TermuxEngine;
 const PhoneControl: any = NativeModules.PhoneControl;
+const FloatingBall: any = NativeModules.FloatingBall;
 
 export const termuxEvents = new NativeEventEmitter(TermuxEngine);
 
@@ -60,6 +61,15 @@ export function saveDeliver(path: string, name: string): Promise<boolean> {
   return TermuxEngine.saveDeliver(path, name);
 }
 
+/** 上传媒体选择（拍照 / 相册 / 文件）。返回 { base64, mime, name } 或取消时 null。 */
+export function pickMedia(kind: 'camera' | 'gallery' | 'file'): Promise<{
+  base64: string;
+  mime: string;
+  name: string;
+} | null> {
+  return TermuxEngine.pickMedia(kind);
+}
+
 /** 请求通知权限（Android 13+ 弹系统授权框）。 */
 export function requestNotificationPermission(): Promise<boolean> {
   return TermuxEngine.requestNotificationPermission();
@@ -83,4 +93,38 @@ export function isPhoneControlEnabled(): Promise<boolean> {
 /** 打开系统无障碍设置页，引导用户开启 DeepSeek Harness 的无障碍服务。 */
 export function openAccessibilitySettings(): Promise<boolean> {
   return PhoneControl.openSettings();
+}
+
+/** 悬浮球：悬浮窗权限是否已授予。 */
+export function floatBallHasPermission(): Promise<boolean> {
+  return FloatingBall.hasPermission();
+}
+
+/** 悬浮球：服务是否在运行。 */
+export function isFloatBallEnabled(): Promise<boolean> {
+  return FloatingBall.isEnabled();
+}
+
+/** 悬浮球：打开系统「显示在其他应用上层」设置页。 */
+export function floatBallRequestPermission(): Promise<boolean> {
+  return FloatingBall.requestPermission();
+}
+
+/** 悬浮球：启动（需悬浮窗权限，未授权返回 false）。 */
+export function floatBallStart(): Promise<boolean> {
+  return FloatingBall.start();
+}
+
+/** 悬浮球：停止。 */
+export function floatBallStop(): Promise<boolean> {
+  return FloatingBall.stop();
+}
+
+/** 悬浮球：汇总状态（supported / permission / enabled）。 */
+export function getFloatBallStatus(): Promise<{
+  supported: boolean;
+  permission: boolean;
+  enabled: boolean;
+}> {
+  return FloatingBall.getStatus();
 }

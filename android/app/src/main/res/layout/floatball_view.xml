@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮球：左侧为「AI 正在使用的工具」标签（无工具时隐藏），右侧为 DeepSeek 图标球 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical">
+
+    <!-- AI 正在使用的工具标签（默认隐藏，FloatingBallService 按状态显示） -->
+    <TextView
+        android:id="@+id/fbTool"
+        android:layout_width="106dp"
+        android:layout_height="34dp"
+        android:layout_marginEnd="6dp"
+        android:background="@drawable/fb_tool_pill"
+        android:gravity="center"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:visibility="gone"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:includeFontPadding="false"
+        android:text="" />
+
+    <!-- 图标球：DeepSeek 黑白原版鲸鱼 + 状态点 -->
+    <FrameLayout
+        android:layout_width="56dp"
+        android:layout_height="56dp">
+
+        <ImageView
+            android:id="@+id/fbIcon"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:src="@drawable/floatball_icon"
+            android:scaleType="fitXY" />
+
+        <!-- 状态指示：右下角小圆点（绿=运行，灰=未运行） -->
+        <FrameLayout
+            android:id="@+id/fbStatus"
+            android:layout_width="15dp"
+            android:layout_height="15dp"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="2dp"
+            android:background="@drawable/fb_ring">
+            <View
+                android:id="@+id/fbStatusDot"
+                android:layout_width="9dp"
+                android:layout_height="9dp"
+                android:layout_gravity="center"
+                android:background="@drawable/fb_dot" />
+        </FrameLayout>
+    </FrameLayout>
+</LinearLayout>

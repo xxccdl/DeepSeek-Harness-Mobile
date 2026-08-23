@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 悬浮球：显示在其他应用上层（悬浮窗权限，系统设置→应用→本应用→显示在其他应用上层） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- 后台运行：前台服务保活 + 通知（Android 13+ 运行时权限） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -22,6 +24,10 @@
         android:name=".TermuxService"
         android:exported="false"
         android:foregroundServiceType="dataSync" />
+      <!-- 悬浮球：桌面 DeepSeek 图标悬浮球（需悬浮窗权限） -->
+      <service
+        android:name=".FloatingBallService"
+        android:exported="false" />
       <!-- 手机控制：AI 读取屏幕元素并点击/滑动/输入（用户需在系统无障碍设置中开启） -->
       <service
         android:name=".PhoneAccessibilityService"
@@ -37,6 +43,16 @@
       <receiver
         android:name=".DeliverReceiver"
         android:exported="false" />
+      <!-- 拍照上传：FileProvider 向相机应用授权写入 cacheDir/camera 输出文件 -->
+      <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="com.dshmobile.fileprovider"
+        android:exported="false"
+        android:grantUriPermissions="true">
+        <meta-data
+          android:name="android.support.FILE_PROVIDER_PATHS"
+          android:resource="@xml/file_paths" />
+      </provider>
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"

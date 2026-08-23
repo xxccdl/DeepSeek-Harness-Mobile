@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   StyleSheet,
   Text,
@@ -15,10 +16,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { pingHost } from '../services/dsh';
 import {
+  floatBallRequestPermission,
+  floatBallStart,
+  floatBallStop,
   isNotificationEnabled,
   isPhoneControlEnabled,
   openAccessibilitySettings,
   openNotificationSettings,
+  pickMedia,
   saveDeliver,
 } from '../services/termux';
 
@@ -30,7 +35,15 @@ interface Props {
 // 会话级标志：每次 App 启动只自动跳转一次无障碍设置（避免反复打断用户）
 let accessibilityAutoPrompted = false;
 
+// WebView 在 react-native-webview 的类型声明里是 FunctionComponent（无实例泛型），
+// 但运行时的 Android 实现 forwardRef 暴露了 injectJavaScript 等命令方法。这里用
+// handle 接口描述我们用到的 ref 能力，避免与声明类型冲突。
+type WebViewHandle = {
+  injectJavaScript: (data: string) => void;
+};
+
 export default function ChatScreen({ port }: Props) {
+  const webViewRef = useRef<WebViewHandle | null>(null);
   const [loading, setLoading] = useState(true);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -68,20 +81,27 @@ export default function ChatScreen({ port }: Props) {
         if (mounted) setNotifOff(!enabled);
       })
       .catch(() => {});
-    isPhoneControlEnabled()
-      .then(enabled => {
-        if (!mounted) return;
-        setPhoneOff(!enabled);
-        // 自动请求辅助功能权限：首次进入且未开启时，自动打开系统无障碍设置页
-        // （Android 安全限制：必须由用户在设置中手动确认开启）
-        if (!enabled && !accessibilityAutoPrompted) {
-          accessibilityAutoPrompted = true;
-          openAccessibilitySettings().catch(() => {});
-        }
-      })
-      .catch(() => {});
+    const checkPhoneControl = () => {
+      isPhoneControlEnabled()
+        .then(enabled => {
+          if (!mounted) return;
+          setPhoneOff(!enabled);
+          // 自动请求辅助功能权限：首次进入且未开启时，自动打开系统无障碍设置页
+          // （Android 安全限制：必须由用户在设置中手动确认开启）
+          if (!enabled && !accessibilityAutoPrompted) {
+            accessibilityAutoPrompted = true;
+            openAccessibilitySettings().catch(() => {});
+          }
+        })
+        .catch(() => {});
+    };
+    checkPhoneControl();
+    // 无障碍状态自动刷新：从系统设置返回、服务被系统杀进程重启后，
+    // 顶部横幅/设置页能自动同步最新状态（无需手动重进页面）。
+    const phoneTimer = setInterval(checkPhoneControl, 3000);
     return () => {
       mounted = false;
+      clearInterval(phoneTimer);
       if (toastTimer.current) clearTimeout(toastTimer.current);
       if (loadingTimer.current) clearTimeout(loadingTimer.current);
     };
@@ -119,6 +139,33 @@ export default function ChatScreen({ port }: Props) {
         } else if (data?.type === 'open-accessibility') {
           // 设置页「开启手机控制」按钮：跳转系统无障碍设置
           openAccessibilitySettings().catch(() => {});
+        } else if (data?.type === 'floatball-open-settings') {
+          // 悬浮球：打开系统悬浮窗权限设置页
+          floatBallRequestPermission().catch(() => {});
+        } else if (data?.type === 'floatball-start') {
+          // 悬浮球：启动
+          floatBallStart().catch(() => {});
+        } else if (data?.type === 'floatball-stop') {
+          // 悬浮球：停止
+          floatBallStop().catch(() => {});
+        } else if (data?.type === 'mobile-pick-media' && typeof data.kind === 'string') {
+          // 「+」上传：调原生相机/相册/文件选择，结果 base64 回传 Web 注入 composer
+          const kind = data.kind;
+          pickMedia(kind as 'camera' | 'gallery' | 'file')
+            .then(result => {
+              if (result == null) return; // 用户取消
+              webViewRef.current?.injectJavaScript(
+                `window.__dshAttachMedia(${JSON.stringify(result.base64)},${JSON.stringify(result.mime)},${JSON.stringify(result.name)}); true;`,
+              );
+            })
+            .catch(() => {
+              webViewRef.current?.injectJavaScript(
+                `window.__dshAttachMedia(null, null, null); true;`,
+              );
+            });
+        } else if (data?.type === 'open-url' && typeof data.url === 'string') {
+          // 检查更新「去 GitHub 下载」：用系统浏览器打开链接
+          Linking.openURL(data.url).catch(() => {});
         }
       } catch {
         // 忽略非 JSON 或无关消息
@@ -176,6 +223,7 @@ export default function ChatScreen({ port }: Props) {
       ) : (
         <View style={styles.webWrap}>
           <WebView
+            ref={webViewRef as never}
             key={key}
             source={{ uri: url }}
             style={styles.web}
