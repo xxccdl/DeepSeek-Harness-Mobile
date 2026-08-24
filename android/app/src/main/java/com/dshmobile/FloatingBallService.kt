@@ -5,13 +5,16 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.FileObserver
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -41,13 +44,20 @@ class FloatingBallService : Service() {
     private const val TAG = "FloatBall"
     private const val STATUS_URL = "http://127.0.0.1:3080/"
     private const val POLL_MS = 2500L
+    /** 探活连续失败时的最大轮询间隔（指数退避上限）。 */
+    private const val POLL_MS_DOWN_MAX = 10_000L
     private const val LONG_PRESS_MS = 450L
     private const val BALL_DP = 56
     // 「AI 正在使用的工具」标签尺寸
     private const val PILL_DP = 106
     private const val PILL_GAP_DP = 6
     // 当前工具状态文件（dsh-mobile-bridge 插件写入 <files>/status/current-tool.json）
-    private const val TOOL_REL_PATH = "status/current-tool.json"
+    private const val TOOL_DIR_REL_PATH = "status"
+    private const val TOOL_FILE_NAME = "current-tool.json"
+    // 悬浮球位置持久化（吸附落边后保存，重启恢复）
+    private const val PREFS_NAME = "floatball"
+    private const val KEY_X = "ball_x"
+    private const val KEY_Y = "ball_y"
 
     @Volatile
     var running = false
@@ -63,8 +73,14 @@ class FloatingBallService : Service() {
   private var wm: WindowManager? = null
   private var ball: View? = null
   private var menu: View? = null
+  // 菜单打开时的全屏透明遮罩：点击任意空白处关闭菜单（模态行为）
+  private var menuScrim: View? = null
   private val handler = Handler(Looper.getMainLooper())
   private var pollThread: Thread? = null
+  private var toolObserver: FileObserver? = null
+  // 最近一次已知的屏幕尺寸（旋转/分屏变化检测用）
+  private var lastScreenW = 0
+  private var lastScreenH = 0
 
   // 小球位置（px，指图标球左上角；窗口宽出时向左让位给工具标签）
   private var ballX = 0
@@ -81,7 +97,11 @@ class FloatingBallService : Service() {
   private var pillVisible = false
   private var toolAnimator: ValueAnimator? = null
 
-  private val longPressRunnable = Runnable { showMenu() }
+  private val longPressRunnable = Runnable {
+    // 触感反馈：确认长按已触发（跟随系统触感设置，无需权限）
+    ball?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    showMenu()
+  }
 
   private val touchSlop: Int by lazy { ViewConfiguration.get(this).scaledTouchSlop }
 
@@ -109,16 +129,41 @@ class FloatingBallService : Service() {
     running = true
     startBall()
     startStatusPolling()
+    startToolWatcher()
     return START_STICKY
+  }
+
+  /**
+   * 屏幕旋转 / 分屏 / 自由窗口：按新尺寸钳制位置并重新吸附到原贴边侧，
+   * 避免球留在旧坐标跑出屏幕。
+   */
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    val sw = resources.displayMetrics.widthPixels
+    val sh = resources.displayMetrics.heightPixels
+    if (sw <= 0 || sh <= 0 || (sw == lastScreenW && sh == lastScreenH)) return
+    val bw = dp(BALL_DP)
+    // 按旧屏幕判断原贴边方向：球心在左半屏则保持贴左，否则贴右
+    val preferLeft = lastScreenW > 0 && ballX + bw / 2 < lastScreenW / 2
+    ballX = if (preferLeft) pillTotalPx() else sw - bw
+    ballY = ballY.coerceIn(0, sh - bw)
+    lastScreenW = sw
+    lastScreenH = sh
+    applyBallLayout()
+    persistPosition()
   }
 
   override fun onDestroy() {
     running = false
     pollThread?.interrupt()
     pollThread = null
+    try { toolObserver?.stopWatching() } catch (_: Exception) {}
+    toolObserver = null
     handler.removeCallbacks(longPressRunnable)
+    try { menuScrim?.let { wm?.removeView(it) } } catch (_: Exception) {}
     try { ball?.let { wm?.removeView(it) } } catch (_: Exception) {}
     try { menu?.let { wm?.removeView(it) } } catch (_: Exception) {}
+    menuScrim = null
     ball = null
     menu = null
     super.onDestroy()
@@ -131,8 +176,16 @@ class FloatingBallService : Service() {
     val view = LayoutInflater.from(this).inflate(R.layout.floatball_view, null)
     view.setOnTouchListener(::onBallTouch)
     ball = view
-    ballX = ballParams.x
-    ballY = ballParams.y
+    val sw = resources.displayMetrics.widthPixels
+    val sh = resources.displayMetrics.heightPixels
+    lastScreenW = sw
+    lastScreenH = sh
+    // 恢复上次吸附位置（无记录则用默认右侧居中），并钳制进当前屏幕
+    val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+    ballX = prefs.getInt(KEY_X, sw - dp(BALL_DP) - dp(20)).coerceIn(0, (sw - dp(BALL_DP)).coerceAtLeast(0))
+    ballY = prefs.getInt(KEY_Y, sh / 2 - dp(BALL_DP)).coerceIn(0, (sh - dp(BALL_DP)).coerceAtLeast(0))
+    ballParams.x = ballX - pillTotalPx()
+    ballParams.y = ballY
     wm?.addView(view, ballParams)
     setStatus(false)
   }
@@ -158,8 +211,11 @@ class FloatingBallService : Service() {
           handler.removeCallbacks(longPressRunnable)
         }
         if (moved && !longPressTriggered) {
+          // 钳制进屏幕范围，避免拖出可视区域
           ballX = (downBallX + dx).toInt()
+            .coerceIn(0, (resources.displayMetrics.widthPixels - dp(BALL_DP)).coerceAtLeast(0))
           ballY = (downBallY + dy).toInt()
+            .coerceIn(0, (resources.displayMetrics.heightPixels - dp(BALL_DP)).coerceAtLeast(0))
           updateBallPosition()
         }
         return true
@@ -208,7 +264,22 @@ class FloatingBallService : Service() {
       ballX = it.animatedValue as Int
       updateBallPosition()
     }
+    anim.addListener(object : android.animation.AnimatorListenerAdapter() {
+      override fun onAnimationEnd(animation: android.animation.Animator) {
+        // 落边触感 + 位置落盘（此后重启恢复到同一位置）
+        ball?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        persistPosition()
+      }
+    })
     anim.start()
+  }
+
+  /** 把当前球位置写入 SharedPreferences（吸附落边 / 屏幕变化重吸附时调用）。 */
+  private fun persistPosition() {
+    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+      .putInt(KEY_X, ballX)
+      .putInt(KEY_Y, ballY)
+      .apply()
   }
 
   private fun openApp() {
@@ -227,17 +298,24 @@ class FloatingBallService : Service() {
     )
   }
 
+  /**
+   * dsh 服务探活：成功后 2.5s 一轮；连续失败按 ×2 指数退避（上限 10s），
+   * 避免引擎关闭时空转高频打点。工具标签不再走本循环（由 FileObserver 事件驱动）。
+   */
   private fun startStatusPolling() {
     pollThread?.interrupt()
     val t = Thread {
+      var delay = POLL_MS
       while (running) {
         val ok = probeDsh()
-        val tool = readCurrentTool()
         handler.post {
+          val changed = ok != lastStatus
           setStatus(ok)
-          setTool(tool)
+          // 菜单开着时状态行同步刷新（仅状态变化时重写，避免无谓 setText）
+          if (menu != null && changed) refreshMenu()
         }
-        try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { break }
+        delay = if (ok) POLL_MS else (delay * 2).coerceAtMost(POLL_MS_DOWN_MAX)
+        try { Thread.sleep(delay) } catch (_: InterruptedException) { break }
       }
     }
     t.isDaemon = true
@@ -258,17 +336,64 @@ class FloatingBallService : Service() {
     false
   }
 
-  /** 读取 dsh-mobile-bridge 插件写入的「当前 AI 工具」状态。 */
-  private fun readCurrentTool(): String? {
+  /**
+   * 解析状态文件里的工具名。
+   * 桥接层全部工具结束时写 {"tool":null}，而 org.json 的 optString 对 JSON null
+   * 会返回字面量字符串 "null"（而非回退值 ""，经典怪癖），不归一化悬浮球就会
+   * 显示「null」。空串 / "null" / "undefined" 一律视为无工具。
+   */
+  private fun normalizeToolName(raw: String): String? =
+    raw.trim().takeUnless { it.isEmpty() || it == "null" || it == "undefined" }
+
+  /**
+   * 读取 current-tool.json。返回 (文件是否读到有效内容, 工具名或 null)：
+   * 前者为 false 表示 IO 层面还没读到位（观察器据此重试）；为 true 时即使
+   * 无工具也立即生效（second 为 null 即清空标签）。
+   */
+  private fun readToolStatus(): Pair<Boolean, String?> {
     return try {
-      val f = File(filesDir, TOOL_REL_PATH)
-      if (!f.exists()) return null
-      val json = JSONObject(f.readText())
-      val tool = json.optString("tool", "").trim()
-      if (tool.isEmpty()) null else tool
+      val f = File(File(filesDir, TOOL_DIR_REL_PATH), TOOL_FILE_NAME)
+      if (!f.exists()) return false to null
+      val text = f.readText()
+      if (text.isBlank()) return false to null
+      true to normalizeToolName(JSONObject(text).optString("tool", ""))
     } catch (_: Exception) {
-      null
+      false to null
     }
+  }
+
+  /**
+   * 监视 <files>/status 目录：dsh-mobile-bridge 插件把「AI 正在使用的工具」
+   * 原子写入 current-tool.json（tmp + rename），这里捕获 MOVED_TO/CREATE 即读，
+   * 工具标签从 2.5s 轮询改为事件驱动（实时）。启动时先同步读一次存量状态。
+   */
+  private fun startToolWatcher() {
+    if (toolObserver != null) return
+    val dir = File(filesDir, TOOL_DIR_REL_PATH)
+    dir.mkdirs()
+    handler.post { setTool(readToolStatus().second) }
+    val observer = object : FileObserver(dir.absolutePath, FileObserver.CREATE or FileObserver.MOVED_TO) {
+      override fun onEvent(event: Int, path: String?) {
+        // 只关心目标文件；.tmp 是写入中的临时文件，rename 完成才会出现在目录里
+        if (path != TOOL_FILE_NAME) return
+        // 独立线程读取：rename 原子完成后内容即完整，仍留小重试兜底极端 IO 时序；
+        // 只有「没读到内容」才重试，「读到但无工具」直接生效不重试
+        Thread {
+          var status: Pair<Boolean, String?> = false to null
+          for (i in 0 until 5) {
+            status = readToolStatus()
+            if (status.first) break
+            try { Thread.sleep(200) } catch (_: InterruptedException) { break }
+          }
+          handler.post {
+            setTool(status.second)
+            if (menu != null) refreshMenu()
+          }
+        }.start()
+      }
+    }
+    toolObserver = observer
+    observer.startWatching()
   }
 
   /** 显示/隐藏「AI 正在使用的工具」标签，带动画与窗口重排。 */
@@ -319,6 +444,17 @@ class FloatingBallService : Service() {
     longPressTriggered = true
     if (menu != null) return
     val wm = wm ?: return
+    // 全屏透明遮罩：接管菜单外所有点击（点击空白处即关闭，模态行为）。
+    // 先加遮罩再加面板，面板 z 序在遮罩之上。
+    val scrim = View(this)
+    scrim.setOnClickListener { hideMenu() }
+    val sp = WindowManager.LayoutParams(
+      WindowManager.LayoutParams.MATCH_PARENT,
+      WindowManager.LayoutParams.MATCH_PARENT,
+      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+      PixelFormat.TRANSLUCENT,
+    ).apply { gravity = Gravity.TOP or Gravity.START }
     val view = LayoutInflater.from(this).inflate(R.layout.floatball_menu, null)
     view.findViewById<View>(R.id.fbMenuOpen).setOnClickListener { openApp(); hideMenu() }
     view.findViewById<View>(R.id.fbMenuClose).setOnClickListener { stopSelf() }
@@ -339,6 +475,8 @@ class FloatingBallService : Service() {
       this.x = x
       this.y = (ballY - dp(30)).coerceIn(dp(8), resources.displayMetrics.heightPixels - dp(220))
     }
+    menuScrim = scrim
+    wm.addView(scrim, sp)
     menu = view
     wm.addView(view, p)
     refreshMenu()
@@ -346,7 +484,9 @@ class FloatingBallService : Service() {
 
   private fun hideMenu() {
     try { menu?.let { wm?.removeView(it) } } catch (_: Exception) {}
+    try { menuScrim?.let { wm?.removeView(it) } } catch (_: Exception) {}
     menu = null
+    menuScrim = null
   }
 
   private fun refreshMenu() {
