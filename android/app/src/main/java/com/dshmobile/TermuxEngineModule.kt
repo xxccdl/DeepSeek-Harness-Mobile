@@ -412,11 +412,18 @@ class TermuxEngineModule(private val reactContext: ReactApplicationContext) :
     }.start()
   }
 
-  /** 把 assets 里的 init 脚本复制到 files 下（每次覆盖，保证与 APK 同步）。 */
+  /**
+   * 把 assets 里的 init 脚本复制到 files 下（每次覆盖，保证与 APK 同步）。
+   * 复制时把 CRLF/CR 归一化为 LF 并去掉 BOM：仓库曾因 Windows autocrlf 把
+   * 脚本存成 CRLF，bash 会报 $'\r': command not found 直接 exit 2；
+   * 这里在运行时兜底，保证落盘的脚本永远是 bash 可执行的 LF。
+   */
   private fun initScriptPath(): String {
     val dest = File(filesDir, "init-termux.sh")
     reactContext.assets.open("termux/init-termux.sh").use { input ->
-      FileOutputStream(dest).use { out -> input.copyTo(out) }
+      val text = input.bufferedReader(Charsets.UTF_8).readText()
+      val clean = text.replace("\uFEFF", "").replace("\r\n", "\n").replace("\r", "\n")
+      FileOutputStream(dest).use { out -> out.write(clean.toByteArray(Charsets.UTF_8)) }
     }
     return dest.absolutePath
   }
