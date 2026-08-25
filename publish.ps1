@@ -223,14 +223,14 @@ function Step-Github {
     }
     # 同步远端：本地落后（non-fast-forward）时先 rebase 合并远端提交，再推送。
     # rebase 冲突时自动采用「本地版本」（发布语义 = 把本地当前代码推上去）。
-    git -C $RepoRoot fetch $GhRemote 2>$null
+    git -C $RepoRoot fetch $GhRemote 2>&1 | Out-Null
     $counts = (git -C $RepoRoot rev-list --left-right --count "HEAD...$GhRemote/$GhBranch" 2>$null).Trim()
     if ($counts) {
         $parts = $counts -split "\s+"
         $behind = [int]$parts[1]
         if ($behind -gt 0) {
             Write-Host "   远端领先 $behind 个提交，rebase 合并..." -ForegroundColor Yellow
-            git -C $RepoRoot rebase $GhRemote/$GhBranch 2>$null | Out-Null
+            git -C $RepoRoot rebase $GhRemote/$GhBranch 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "   rebase 冲突，自动采用本地版本解决..." -ForegroundColor Yellow
                 $conflicts = (git -C $RepoRoot diff --name-only --diff-filter=U 2>$null)
@@ -238,15 +238,15 @@ function Step-Github {
                     $conflicts | ForEach-Object { git -C $RepoRoot checkout --theirs -- $_ 2>$null; git -C $RepoRoot add -- $_ 2>$null }
                 }
                 $env:GIT_EDITOR = "true"
-                git -C $RepoRoot rebase --continue 2>$null | Out-Null
+                git -C $RepoRoot rebase --continue 2>&1 | Out-Null
                 if ($LASTEXITCODE -ne 0) { throw "git rebase 冲突自动解决失败，请手动处理" }
             }
         }
     }
-    git -C $RepoRoot push $GhRemote "$GhBranch" 2>$null | Out-Null
+    git -C $RepoRoot push $GhRemote "$GhBranch" 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "git push github 失败" }
     git -C $RepoRoot tag -f $Tag
-    git -C $RepoRoot push -f $GhRemote $Tag 2>$null | Out-Null
+    git -C $RepoRoot push -f $GhRemote $Tag 2>&1 | Out-Null
 
     # 查找/创建 release
     $existing = Invoke-Json { & $curl $curlArgs -sS "$GhApi/releases/tags/$Tag" @authHeaders }
@@ -336,8 +336,8 @@ function Step-Gitee {
 
     # 推送代码 + tag
     Write-Line "==> [7/7] 推送 Gitee 代码 + 分卷上传"
-    git -C $RepoRoot push -f $GtRemote "$GhBranch`:$GtBranch" 2>$null | Out-Null
-    git -C $RepoRoot push -f $GtRemote $Tag 2>$null | Out-Null
+    git -C $RepoRoot push -f $GtRemote "$GhBranch`:$GtBranch" 2>&1 | Out-Null
+    git -C $RepoRoot push -f $GtRemote $Tag 2>&1 | Out-Null
 
     # 7-Zip 分卷
     $outDir = Join-Path $RepoRoot "dist-gitee"
