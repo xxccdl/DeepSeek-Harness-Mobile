@@ -206,6 +206,11 @@ function Step-Build {
 # 3-4. GitHub
 # ---------------------------------------------------------------
 function Step-Github {
+    # git push/fetch 的 stderr 在 ErrorActionPreference=Stop 下会触发
+    # NativeCommandError 中断整个发布；临时降级为 Continue，用 $LASTEXITCODE 判断。
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
     Write-Line "==> [3/7] 获取 GitHub token"
     $token = Get-GitToken "github.com"
     $curl = Resolve-Curl
@@ -283,12 +288,19 @@ function Step-Github {
     $up = Invoke-Json { & $curl $curlArgs -sS -X POST "https://uploads.github.com/repos/$GhOwner/$GhRepo/releases/$releaseId/assets?name=$ApkName" @authHeaders -H "Content-Type: application/vnd.android.package-archive" --data-binary "@$ApkPath" }
     if ($up -and $up.browser_download_url) { Write-Host "   GitHub 资产上传成功" -ForegroundColor Green }
     else { Write-Warning "GitHub 资产上传可能失败" }
+    }
+    finally {
+        $ErrorActionPreference = $oldEap
+    }
 }
 
 # ---------------------------------------------------------------
 # 5-7. Gitee
 # ---------------------------------------------------------------
 function Step-Gitee {
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
     Write-Line "==> [5/7] 获取 Gitee token"
     $token = Get-GitToken "gitee.com"
     $curl = Resolve-Curl
@@ -355,6 +367,10 @@ function Step-Gitee {
         $resp = Invoke-Json { & $curl $curlArgs -sS -X POST "$GtApi/releases/$releaseId/attach_files" -F "access_token=$token" -F "file=@$($p.FullName -replace '\\','/')" }
         if ($resp -and $resp.browser_download_url) { Write-Host "     -> 成功" -ForegroundColor Green }
         else { Write-Warning "     -> 失败" }
+    }
+    }
+    finally {
+        $ErrorActionPreference = $oldEap
     }
 }
 
