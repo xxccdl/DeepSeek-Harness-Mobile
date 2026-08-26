@@ -67,29 +67,33 @@ window.__ModuleLoader__.load({
 				};
 			}, [refresh]);
 
-			if (data === undefined || data.configured !== true || typeof data.balance !== "number") return null;
+			if (data === undefined || data.configured !== true) return null;
 			// "已用" tracks the current conversation's spend (sessions.current), not
 			// the all-time total (sessions.total). Persisted server-side in usage.json.
+			// Custom / self-hosted providers often expose no public balance endpoint,
+			// so `balance` may be absent — the bar then degrades to the spend estimate.
+			const hasBalance = typeof data.balance === "number";
 			const spent = Math.max(0, Number(data.sessions?.current ?? data.spent) || 0);
-			const balance = Math.max(0, Number(data.balance) || 0);
+			const balance = hasBalance ? Math.max(0, Number(data.balance) || 0) : 0;
 			const total = spent + balance;
 			const ratio = total > 0 ? Math.min(1, spent / total) : 0;
-			const remaining = total > 0 ? Math.max(0, balance / total) : 0;
+			const remaining = hasBalance && total > 0 ? Math.max(0, balance / total) : 0;
 			const hue = hueOf(ratio);
 			const fill = { width: `${Math.round(remaining * 100)}%`, background: `hsl(${hue} 72% 52%)` };
-			const currency = typeof data.currency === "string" ? data.currency : "CNY";
+			const currency = hasBalance && typeof data.currency === "string" ? data.currency : "CNY";
 			const money = (v) => `${currency === "CNY" ? "¥" : ""}${v.toFixed(2)}`;
+			const tip = hasBalance ? t("tooltip") : t("tooltipNoBalance");
 
 			if (wide === false) {
 				return jsx("div", {
 					className: "myuse-dot",
-					title: `${t("spent")} ${money(spent)} · ${t("balance")} ${money(balance)}`,
-					children: jsx("div", { className: "myuse-fill", style: fill })
+					title: `${t("spent")} ${money(spent)}${hasBalance ? ` · ${t("balance")} ${money(balance)}` : ""}`,
+					children: hasBalance ? jsx("div", { className: "myuse-fill", style: fill }) : undefined
 				});
 			}
 			return jsxs("div", {
 				className: "myuse-bar",
-				title: `${t("tooltip")}`,
+				title: tip,
 				children: [
 					jsxs("div", { className: "myuse-cols", children: [
 						jsxs("div", { className: "myuse-cell", children: [
@@ -97,11 +101,11 @@ window.__ModuleLoader__.load({
 							jsx("span", { className: "myuse-v", children: money(spent) })
 						] }),
 						jsxs("div", { className: "myuse-cell", children: [
-							jsx("span", { className: "myuse-v", children: money(balance) }),
+							jsx("span", { className: "myuse-v", children: hasBalance ? money(balance) : t("noBalance") }),
 							jsx("span", { className: "myuse-k", children: t("balance") })
 						] })
 					] }),
-					jsx("div", { className: "myuse-track", children: jsx("div", { className: "myuse-fill", style: fill }) })
+					hasBalance ? jsx("div", { className: "myuse-track", children: jsx("div", { className: "myuse-fill", style: fill }) }) : null
 				]
 			});
 		}
@@ -114,12 +118,16 @@ window.__ModuleLoader__.load({
 				zh: {
 					"spent": "已用",
 					"balance": "余额",
-					"tooltip": "按 token 用量估算的花费与 DeepSeek 实时余额（血条越长越接近用尽）"
+					"noBalance": "—",
+					"tooltip": "按 token 用量估算的花费与 DeepSeek 实时余额（血条越长越接近用尽）",
+					"tooltipNoBalance": "按 token 用量估算的花费（当前模型提供商无公开余额接口，仅显示已用）"
 				},
 				en: {
 					"spent": "Used",
 					"balance": "Balance",
-					"tooltip": "Estimated spend from token usage and live DeepSeek balance (bar fills as you approach empty)"
+					"noBalance": "—",
+					"tooltip": "Estimated spend from token usage and live DeepSeek balance (bar fills as you approach empty)",
+					"tooltipNoBalance": "Estimated spend from token usage (current provider exposes no public balance endpoint)"
 				}
 			}), "ui-usage: dictionaries");
 			boundT = ctx.locale.bind(NS);

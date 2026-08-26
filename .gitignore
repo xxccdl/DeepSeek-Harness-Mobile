@@ -115,6 +115,9 @@ mmmbuto-node-pty-android-arm64-1.1.2.tgz
 /android/build-release.log
 /android/keystore.properties
 
+# ---- Gitee 分卷产物（每次发布临时生成，release 附件分发，不入库） ----
+/dist-gitee/
+
 # ---- iOS 暂不支持 ----
 /ios/
 /.bundle/

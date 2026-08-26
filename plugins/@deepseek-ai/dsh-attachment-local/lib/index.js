@@ -14,6 +14,88 @@ const MEDIA_TYPES = {
 	webp: "image/webp",
 	gif: "image/gif"
 };
+/** True when a caught error means sharp's native library is absent (the
+ *  Android bundle ships a stub that throws this message on first call). */
+function sharpUnavailableError(error) {
+	return error instanceof Error && /sharp native module unavailable/i.test(error.message);
+}
+function readU16LE(bytes, off) {
+	return bytes[off] | (bytes[off + 1] << 8);
+}
+function readU16BE(bytes, off) {
+	return (bytes[off] << 8) | bytes[off + 1];
+}
+function readU32BE(bytes, off) {
+	return ((bytes[off] << 24) | (bytes[off + 1] << 16) | (bytes[off + 2] << 8) | bytes[off + 3]) >>> 0;
+}
+/**
+* Header-only raster probe: validate magic bytes and read intrinsic dimensions
+* for PNG / JPEG / WebP / GIF without decoding pixels. Used as the fallback
+* when sharp is unavailable (the Android bundle stubs it out), so the
+* attachment pipeline still works there. Admission is weaker than sharp's full
+* decode — it checks the container header rather than the whole raster — which
+* is the best a pure-JS path can do without a native image library.
+* @param data - complete encoded image bytes.
+* @returns verified format and dimensions.
+* @throws {@link AttachmentError} INVALID_IMAGE when the header is unsupported or malformed.
+*/
+function probeHeader(data) {
+	const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+	// PNG: 8-byte signature + IHDR (width/height at 16/20, big-endian).
+	if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+		&& bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+		&& bytes[12] === 0x49 && bytes[13] === 0x48 && bytes[14] === 0x44 && bytes[15] === 0x52) {
+		return { mediaType: "image/png", width: readU32BE(bytes, 16), height: readU32BE(bytes, 20) };
+	}
+	// JPEG: SOI (FF D8 FF), then walk segments to the first SOF marker.
+	if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+		let off = 2;
+		while (off + 4 < bytes.length) {
+			while (off < bytes.length && bytes[off] === 0xff) off += 1;
+			if (off >= bytes.length) break;
+			const marker = bytes[off];
+			off += 1;
+			if (marker === 0xd9 || marker === 0xda) break; // EOI / SOS
+			if (off + 2 > bytes.length) break;
+			const segLen = readU16BE(bytes, off);
+			off += 2;
+			// SOF0..SOF15 except DHT(C4) / JPG(C8) / DAC(CC).
+			if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+				if (off + 5 > bytes.length) break;
+				return { mediaType: "image/jpeg", width: readU16BE(bytes, off + 3), height: readU16BE(bytes, off + 1) };
+			}
+			if (segLen < 2) break;
+			off += segLen - 2;
+		}
+	}
+	// GIF: GIF87a / GIF89a, logical screen width/height at 6/8 (little-endian).
+	if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+		return { mediaType: "image/gif", width: readU16LE(bytes, 6), height: readU16LE(bytes, 8) };
+	}
+	// WebP: RIFF....WEBP + chunk; dimensions live in the first chunk's payload.
+	if (bytes.length >= 30 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+		&& bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+		const fourcc = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
+		if (fourcc === "VP8X") {
+			// Canvas size: 3-byte little-endian at 24 (width) / 27 (height), each +1.
+			const w = bytes[24] | (bytes[25] << 8) | (bytes[26] << 16);
+			const h = bytes[27] | (bytes[28] << 8) | (bytes[29] << 16);
+			return { mediaType: "image/webp", width: (w & 0xffffff) + 1, height: (h & 0xffffff) + 1 };
+		}
+		if (fourcc === "VP8 ") {
+			// Lossy frame: 14-bit little-endian at 26 (width) / 28 (height).
+			return { mediaType: "image/webp", width: readU16LE(bytes, 26) & 0x3fff, height: readU16LE(bytes, 28) & 0x3fff };
+		}
+		if (fourcc === "VP8L" && bytes.length >= 25) {
+			// Lossless: signature 0x2f at 20, then 32-bit LE where bits 0-13 = width-1, bits 14-27 = height-1.
+			const b0 = bytes[21], b1 = bytes[22], b2 = bytes[23], b3 = bytes[24];
+			const w = 1 + (b0 | ((b1 & 0x3f) << 8));
+			const h = 1 + ((b1 >> 6) | (b2 << 2) | ((b3 & 0x0f) << 10));
+			return { mediaType: "image/webp", width: w, height: h };
+		}
+	}
+	throw new AttachmentError("Unsupported or malformed image data.", "INVALID_IMAGE");
+}
 async function imageMetadata(image) {
 	const metadata = await image.metadata();
 	const mediaType = MEDIA_TYPES[metadata.format];
@@ -40,6 +122,7 @@ async function probeImage(data) {
 		}));
 	} catch (error) {
 		if (error instanceof AttachmentError) throw error;
+		if (sharpUnavailableError(error)) return probeHeader(data);
 		throw new AttachmentError("Unsupported or malformed image data.", "INVALID_IMAGE", { cause: error });
 	}
 }
@@ -61,6 +144,7 @@ async function detectImage(data, maxPixels) {
 		return detected;
 	} catch (error) {
 		if (error instanceof AttachmentError) throw error;
+		if (sharpUnavailableError(error)) return probeHeader(data);
 		throw new AttachmentError("Unsupported or malformed image data.", "INVALID_IMAGE", { cause: error });
 	}
 }

@@ -51,6 +51,8 @@ class FloatingBallService : Service() {
     // 「AI 正在使用的工具」标签尺寸
     private const val PILL_DP = 106
     private const val PILL_GAP_DP = 6
+    // 工具结束后标签停留时长：刚结束的工具再显示 1 秒便于看清，然后才淡出消失
+    private const val TOOL_HIDE_DELAY_MS = 1000L
     // 当前工具状态文件（dsh-mobile-bridge 插件写入 <files>/status/current-tool.json）
     private const val TOOL_DIR_REL_PATH = "status"
     private const val TOOL_FILE_NAME = "current-tool.json"
@@ -96,6 +98,8 @@ class FloatingBallService : Service() {
   @Volatile private var currentTool: String? = null
   private var pillVisible = false
   private var toolAnimator: ValueAnimator? = null
+  // 挂起的标签隐藏任务：工具结束 1 秒后才执行淡出；新工具到来时取消
+  private var pendingHideRunnable: Runnable? = null
 
   private val longPressRunnable = Runnable {
     // 触感反馈：确认长按已触发（跟随系统触感设置，无需权限）
@@ -160,6 +164,8 @@ class FloatingBallService : Service() {
     try { toolObserver?.stopWatching() } catch (_: Exception) {}
     toolObserver = null
     handler.removeCallbacks(longPressRunnable)
+    pendingHideRunnable?.let { handler.removeCallbacks(it) }
+    pendingHideRunnable = null
     try { menuScrim?.let { wm?.removeView(it) } } catch (_: Exception) {}
     try { ball?.let { wm?.removeView(it) } } catch (_: Exception) {}
     try { menu?.let { wm?.removeView(it) } } catch (_: Exception) {}
@@ -403,25 +409,37 @@ class FloatingBallService : Service() {
     val pill = ball?.findViewById<TextView>(R.id.fbTool) ?: return
     toolAnimator?.cancel()
     if (name == null) {
-      if (pill.visibility != View.GONE) {
-        pillVisible = false
-        toolAnimator = ValueAnimator.ofFloat(1f, 0f).apply {
-          duration = 150
-          addUpdateListener { pill.alpha = it.animatedValue as Float }
-          addListener(object : android.animation.AnimatorListenerAdapter() {
-            override fun onAnimationEnd(animation: android.animation.Animator) {
-              if (currentTool == null) {
-                pill.visibility = View.GONE
-                pill.alpha = 1f
-                applyBallLayout()
+      // 工具刚结束：先取消任何未执行的隐藏，1 秒后再淡出消失，方便看清刚用的工具；
+      // 期间若有新工具到来，setTool(非 null) 会取消这个挂起的隐藏并立即显示。
+      pendingHideRunnable?.let { handler.removeCallbacks(it) }
+      if (pill.visibility == View.GONE) return
+      val runnable = Runnable {
+        pendingHideRunnable = null
+        if (currentTool == null && pill.visibility != View.GONE) {
+          pillVisible = false
+          toolAnimator = ValueAnimator.ofFloat(1f, 0f).apply {
+            duration = 150
+            addUpdateListener { pill.alpha = it.animatedValue as Float }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+              override fun onAnimationEnd(animation: android.animation.Animator) {
+                if (currentTool == null) {
+                  pill.visibility = View.GONE
+                  pill.alpha = 1f
+                  applyBallLayout()
+                }
               }
-            }
-          })
-          start()
+            })
+            start()
+          }
         }
       }
+      pendingHideRunnable = runnable
+      handler.postDelayed(runnable, TOOL_HIDE_DELAY_MS)
       return
     }
+    // 新工具到来：取消挂起的隐藏，立即显示新工具名
+    pendingHideRunnable?.let { handler.removeCallbacks(it) }
+    pendingHideRunnable = null
     pill.text = name
     if (pill.visibility != View.VISIBLE) {
       pill.alpha = 0f
